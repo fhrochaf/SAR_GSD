@@ -84,15 +84,24 @@ products_df, files = downloader.download_by_area_and_dates(
 ```python
 from sar_gsd.cubes import create_datacube_from_files, save_datacube
 
-# Create time series data cube
+# Create time series data cube from zipped SAFE files
 datacube = create_datacube_from_files(
     file_paths=files,
-    band_name="intensity"
+    band_name="intensity",
+    unzip=True,          # Automatically extract .SAFE.zip files
+    polarization='vv',   # Choose 'vv' or 'vh' polarization
+    cleanup=True         # Clean up extracted files after processing
 )
 
 # Save for later use
 save_datacube(datacube, "data/processed/datacube.nc")
 ```
+
+**Note:** The `unzip=True` parameter allows you to work directly with downloaded `.SAFE.zip` files without manually extracting them first. The function will automatically:
+- Extract each zip file to a temporary directory
+- Locate and read the appropriate TIFF files
+- Create the datacube
+- Clean up temporary files (if `cleanup=True`)
 
 ### 3. Analyze Deformation
 
@@ -151,15 +160,11 @@ SAR_GSD/
 │       ├── preprocessing.py  # SAR preprocessing functions
 │       ├── visualization.py  # Plotting and visualization
 │       └── config.py         # Configuration management
-├── notebooks/            # Jupyter notebooks
-│   ├── 01_exploration.ipynb
-│   ├── 02_timeseries_analysis.ipynb
-│   └── 03_results_visualization.ipynb
 ├── tests/                # Unit tests
 ├── outputs/              # Generated figures and results
 ├── docs/                 # Documentation
 ├── requirements.txt      # Dependencies
-└── README.md            # This file
+└── README.md             # This file
 ```
 
 ## Methodology

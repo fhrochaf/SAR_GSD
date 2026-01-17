@@ -85,23 +85,23 @@ class Config:
         Get predefined study area configurations.
         
         Args:
-            name: Study area name (e.g., 'test_area', 'portugal_north')
+            name: Study area name (e.g., 'test_area')
             
         Returns:
             Dictionary with bbox, dates, etc., or None if not found
         """
         study_areas = {
             "test_area": {
-                "bbox": [-8.7, 40.5, -8.3, 40.8],  # [min_lon, min_lat, max_lon, max_lat]
-                "name": "Test Area - Northern Portugal",
-                "start_date": "2023-01-01",
-                "end_date": "2023-12-31",
+                "bbox": [-42.843182,-19.645174,-42.488873,-19.396658],  # [min_lon, min_lat, max_lon, max_lat]
+                "name": "Test Area: Ipatinga, Minas Gerais, Brazil",
+                "start_date": "2020-01-01",
+                "end_date": "2025-12-31",
             },
-            "portugal_north": {
-                "bbox": [-8.8, 41.0, -8.0, 41.5],
-                "name": "Northern Portugal - Douro Valley",
-                "start_date": "2022-01-01",
-                "end_date": "2023-12-31",
+            "test_area_2": {
+                "bbox": [-44.092747,-20.057493,-44.028615,-19.998142],
+                "name": "Test Area 2: Ipatinga, Minas Gerais, Brazil",
+                "start_date": "2020-01-01",
+                "end_date": "2025-12-31",
             },
         }
         return study_areas.get(name)

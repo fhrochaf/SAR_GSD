@@ -35,7 +35,7 @@ wheels/
 .ipynb_checkpoints
 *.ipynb_checkpoints/
 
-# Environment variables
+# # Environment variables
 .env
 
 # Data files (large SAR imagery)
@@ -68,3 +68,6 @@ docs/_build/
 *.pt
 *.h5
 *.ckpt
+
+# Temporary folders
+_temp/

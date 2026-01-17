@@ -366,6 +366,156 @@ def plot_multiple_timeseries(
     return fig
 
 
-def plot_results():
-    """Plot results."""
-    pass
+def plot_deformation_classification(
+    classification_map: xr.DataArray,
+    save_path: Optional[Path] = None,
+    title: str = "Deformation Classification"
+) -> plt.Figure:
+    """
+    Plot deformation classification map with categorical colors.
+
+    Args:
+        classification_map: Classification DataArray with integer classes
+        save_path: Path to save figure
+        title: Plot title
+
+    Returns:
+        Matplotlib figure
+    """
+    # Define colors for each class
+    colors = ['#2ecc71', '#f39c12', '#e67e22', '#e74c3c', '#3498db']  # stable, slow, moderate, fast, uplift
+    class_names = ['Stable', 'Slow Subsidence', 'Moderate Subsidence', 'Fast Subsidence', 'Uplift']
+    class_values = [0, 1, 2, 3, -1]
+
+    # Create custom colormap
+    cmap = mcolors.ListedColormap(colors)
+    bounds = [-1.5, -0.5, 0.5, 1.5, 2.5, 3.5]
+    norm = mcolors.BoundaryNorm(bounds, cmap.N)
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(12, 10))
+
+    # Plot
+    im = ax.imshow(classification_map, cmap=cmap, norm=norm)
+
+    # Create colorbar with class labels
+    cbar = plt.colorbar(im, ax=ax, ticks=class_values, shrink=0.8)
+    cbar.ax.set_yticklabels(class_names)
+    cbar.set_label('Deformation Class', fontsize=12)
+
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xlabel('X (pixels)', fontsize=12)
+    ax.set_ylabel('Y (pixels)', fontsize=12)
+
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=Config.DPI, bbox_inches='tight')
+        logger.info(f"Saved classification map to {save_path}")
+
+    return fig
+
+
+def plot_hotspots(
+    hotspot_map: xr.DataArray,
+    velocity_map: Optional[xr.DataArray] = None,
+    save_path: Optional[Path] = None,
+    title: str = "Deformation Hotspots"
+) -> plt.Figure:
+    """
+    Plot deformation hotspots overlaid on velocity map.
+
+    Args:
+        hotspot_map: Labeled hotspot map (0 = no hotspot, >0 = hotspot ID)
+        velocity_map: Optional velocity map as background
+        save_path: Path to save figure
+        title: Plot title
+
+    Returns:
+        Matplotlib figure
+    """
+    fig, ax = plt.subplots(figsize=(12, 10))
+
+    # Plot velocity as background if provided
+    if velocity_map is not None:
+        vmin = np.nanpercentile(velocity_map, 5)
+        vmax = np.nanpercentile(velocity_map, 95)
+        vmax_abs = max(abs(vmin), abs(vmax))
+
+        velocity_map.plot(
+            ax=ax,
+            cmap='RdBu_r',
+            vmin=-vmax_abs,
+            vmax=vmax_abs,
+            cbar_kwargs={'label': 'Velocity (mm/year)', 'shrink': 0.8},
+            alpha=0.7
+        )
+
+    # Overlay hotspots
+    hotspot_masked = np.ma.masked_where(hotspot_map == 0, hotspot_map)
+    im = ax.imshow(hotspot_masked, cmap='Reds', alpha=0.8, vmin=0, vmax=hotspot_masked.max())
+
+    # Add colorbar for hotspots
+    cbar = plt.colorbar(im, ax=ax, shrink=0.6, pad=0.1)
+    cbar.set_label('Hotspot ID', fontsize=12)
+
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xlabel('X (pixels)', fontsize=12)
+    ax.set_ylabel('Y (pixels)', fontsize=12)
+
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=Config.DPI, bbox_inches='tight')
+        logger.info(f"Saved hotspots map to {save_path}")
+
+    return fig
+
+
+def plot_susceptibility_map(
+    susceptibility_map: xr.DataArray,
+    save_path: Optional[Path] = None,
+    title: str = "Landslide Susceptibility"
+) -> plt.Figure:
+    """
+    Plot landslide susceptibility map.
+
+    Args:
+        susceptibility_map: Susceptibility DataArray (0-1 scale)
+        save_path: Path to save figure
+        title: Plot title
+
+    Returns:
+        Matplotlib figure
+    """
+    fig, ax = plt.subplots(figsize=(12, 10))
+
+    # Plot with warm colors (yellow to red)
+    susceptibility_map.plot(
+        ax=ax,
+        cmap='YlOrRd',
+        vmin=0,
+        vmax=1,
+        cbar_kwargs={'label': 'Susceptibility (0-1)', 'shrink': 0.8}
+    )
+
+    # Add contours for high susceptibility zones
+    susceptibility_map.plot.contour(
+        ax=ax,
+        levels=[0.5, 0.7, 0.9],
+        colors=['blue', 'orange', 'red'],
+        linewidths=1.5,
+        alpha=0.7
+    )
+
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xlabel('X (pixels)', fontsize=12)
+    ax.set_ylabel('Y (pixels)', fontsize=12)
+
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=Config.DPI, bbox_inches='tight')
+        logger.info(f"Saved susceptibility map to {save_path}")
+
+    return fig

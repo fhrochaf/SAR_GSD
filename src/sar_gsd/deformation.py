@@ -19,35 +19,6 @@ from .config import Config
 logger = logging.getLogger(__name__)
 
 
-def calculate_velocity_map(
-    datacube: xr.DataArray,
-    method: str = "linear",
-    **kwargs
-) -> xr.DataArray:
-    """
-    Generate deformation velocity map.
-    
-    Args:
-        datacube: Input time series
-        method: 'linear' or 'polynomial'
-        **kwargs: Additional parameters for trend detection
-        
-    Returns:
-        Velocity map in mm/year
-    """
-    from .timeseries import detect_linear_trends
-    
-    velocity, pvalue, rsquared = detect_linear_trends(datacube, **kwargs)
-    
-    # Mask insignificant pixels
-    significance_threshold = kwargs.get('significance_threshold', 0.05)
-    velocity_masked = velocity.where(pvalue < significance_threshold)
-    
-    logger.info(f"Velocity map: {np.nanmean(velocity_masked):.2f} ± {np.nanstd(velocity_masked):.2f} mm/year")
-    
-    return velocity_masked
-
-
 def classify_deformation_zones(
     velocity_map: xr.DataArray,
     thresholds: Optional[Dict[str, float]] = None
@@ -159,78 +130,6 @@ def landslide_susceptibility(
     logger.info(f"Mean susceptibility: {susceptibility.mean().values:.3f}")
     
     return susceptibility
-
-
-def temporal_clustering(
-    datacube: xr.DataArray,
-    n_clusters: int = 5,
-    sample_fraction: float = 0.1
-) -> Tuple[xr.DataArray, np.ndarray]:
-    """
-    Cluster pixels by temporal deformation behavior.
-    
-    Args:
-        datacube: Input time series
-        n_clusters: Number of clusters (if using K-means)
-        sample_fraction: Fraction of pixels to sample for clustering
-        
-    Returns:
-        Tuple of (cluster map, cluster centers)
-    """
-    from sklearn.cluster import KMeans
-    
-    logger.info(f"Clustering temporal patterns (n_clusters={n_clusters})...")
-    
-    # Reshape datacube to (n_pixels, n_times)
-    n_times = datacube.shape[0]
-    ny, nx = datacube.shape[1:]
-    
-    data_2d = datacube.values.reshape(n_times, -1).T
-    
-    # Remove pixels with too many NaNs
-    valid_mask = np.isnan(data_2d).sum(axis=1) < (n_times * 0.3)
-    valid_data = data_2d[valid_mask]
-    
-    # Fill remaining NaNs with temporal mean
-    col_mean = np.nanmean(valid_data, axis=0)
-    inds = np.where(np.isnan(valid_data))
-    valid_data[inds] = np.take(col_mean, inds[1])
-    
-    # Sample for efficiency
-    n_samples = int(len(valid_data) * sample_fraction)
-    sample_idx = np.random.choice(len(valid_data), n_samples, replace=False)
-    sample_data = valid_data[sample_idx]
-    
-    # Cluster
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    kmeans.fit(sample_data)
-    
-    # Predict all pixels
-    labels = kmeans.predict(valid_data)
-    
-    # Reshape back to spatial dimensions
-    cluster_map = np.full(ny * nx, -1, dtype=int)
-    cluster_map[valid_mask] = labels
-    cluster_map = cluster_map.reshape(ny, nx)
-    
-    # Create DataArray
-    cluster_da = xr.DataArray(
-        cluster_map,
-        coords={'y': datacube.y, 'x': datacube.x},
-        dims=['y', 'x'],
-        name='clusters'
-    )
-    
-    cluster_da.attrs['n_clusters'] = n_clusters
-    cluster_da.attrs['method'] = 'K-means'
-    
-    # Copy spatial reference
-    if hasattr(datacube, 'rio'):
-        cluster_da = cluster_da.rio.write_crs(datacube.rio.crs)
-    
-    logger.info(f"Clustering complete. Found {n_clusters} temporal patterns")
-    
-    return cluster_da, kmeans.cluster_centers_
 
 
 def identify_deformation_hotspots(
