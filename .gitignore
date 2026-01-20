@@ -69,5 +69,8 @@ docs/_build/
 *.h5
 *.ckpt
 
-# Temporary folders
+# Folders
 _temp/
+_sar_gsd_notimplemented/
+outputs/
+docs/
