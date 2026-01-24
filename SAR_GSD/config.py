@@ -23,9 +23,6 @@ class Config:
 
     PROJECT_ROOT = Path(__file__).parent.parent
     DATA_DIR = PROJECT_ROOT / "data"
-    RAW_DATA_DIR = DATA_DIR / "raw"
-    PROCESSED_DATA_DIR = DATA_DIR / "processed"
-    EXTERNAL_DATA_DIR = DATA_DIR / "external"
     OUTPUT_DIR = PROJECT_ROOT / "outputs"
     CACHE_DIR = PROJECT_ROOT / ".cache"
 
@@ -37,6 +34,8 @@ class Config:
     SENTINEL_HUB_CLIENT_ID = os.getenv("SENTINEL_HUB_CLIENT_ID")
     SENTINEL_HUB_CLIENT_SECRET = os.getenv("SENTINEL_HUB_CLIENT_SECRET")
 
+    # Open Topography Key
+    KEY_OPEN_TOPOGRAPHY = os.getenv("KEY_OPEN_TOPOGRAPHY")
 
     # ============================================================
     # SENTINEL-1 DATA ACQUISITION PARAMETERS
@@ -62,6 +61,7 @@ class Config:
 
     # Change detection threshold (log-intensity change per year)
     CHANGE_THRESHOLD = 0.07
+    P_VALUE_THRESHOLD = 0.05
 
     # Spatial filtering parameters
     GAUSSIAN_SIGMA = 1.5  # Gaussian filter sigma in pixels
@@ -82,15 +82,16 @@ class Config:
     # ============================================================
 
     # Output file names
-    DATACUBE_FILENAME = "sar_datacube.tif"
-    LATEST_IMAGE_FILENAME = "sar_latest.tif"
+    DATACUBE_FILENAME = "sar_datacube.nc"
     TREND_MAP_FILENAME = "sar_trend.tif"
     PVALUES_MAP_FILENAME = "sar_pvalues.tif"
     POSITIVE_MASK_FILENAME = "positive_change_mask.tif"
     NEGATIVE_MASK_FILENAME = "negative_change_mask.tif"
     INTENSITY_FIGURE_FILENAME = "sar_intensity.png"
     OVERLAY_FIGURE_FILENAME = "sar_change_overlay.png"
-    KML_FILENAME = "sar_change_detection.kml"
+    GPKG_FILENAME = "sar_change_detection.gpkg"
+    DEM_FILENAME = "dem.tif"
+    SLOPE_FILENAME = "slope.tif"
 
     # Visualization parameters
     DPI = 150  # Resolution for saved figures
@@ -107,9 +108,6 @@ class Config:
         """Create necessary directories if they don't exist."""
         directories = [
             cls.DATA_DIR,
-            cls.RAW_DATA_DIR,
-            cls.PROCESSED_DATA_DIR,
-            cls.EXTERNAL_DATA_DIR,
             cls.OUTPUT_DIR,
             cls.CACHE_DIR,
         ]
@@ -125,16 +123,6 @@ class Config:
             True if both CLIENT_ID and CLIENT_SECRET are set, False otherwise
         """
         return bool(cls.SENTINEL_HUB_CLIENT_ID and cls.SENTINEL_HUB_CLIENT_SECRET)
-
-    @classmethod
-    def validate_copernicus_credentials(cls) -> bool:
-        """
-        Check if Copernicus credentials are configured.
-
-        Returns:
-            True if both USERNAME and PASSWORD are set, False otherwise
-        """
-        return bool(cls.COPERNICUS_USERNAME and cls.COPERNICUS_PASSWORD)
 
     @classmethod
     def get_study_area(cls, name: str) -> Optional[Dict[str, Any]]:
@@ -201,7 +189,6 @@ class Config:
             },
             "credentials": {
                 "sentinel_hub_configured": cls.validate_sentinel_hub_credentials(),
-                "copernicus_configured": cls.validate_copernicus_credentials(),
             },
         }
 

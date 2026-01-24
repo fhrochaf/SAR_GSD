@@ -7,11 +7,14 @@ This module provides functions to:
 - Build georeferenced xarray datacubes
 """
 
+import requests
 import numpy as np
 import xarray as xr
-import rioxarray  # IMPORTANT: This registers the .rio accessor for xarray
+import rioxarray
 from datetime import datetime, date
 from typing import List, Tuple, Optional
+import os
+from rasterio.io import MemoryFile
 
 from sentinelhub import (
     SHConfig,
@@ -330,3 +333,83 @@ def build_datacube(
         print(f"Date range: {valid_dates[0]} to {valid_dates[-1]}")
 
     return datacube, valid_dates
+
+
+def get_dem(bounds: List[float],
+            key_opentopo: Optional[str] = Config.KEY_OPEN_TOPOGRAPHY,
+            save_dem_raster: bool = True,
+            output_dir: Optional[str] = None):
+    """
+    Get DEM data from OpenTopography.
+
+    bounds: [xmin, ymin, xmax, ymax] bounding box
+    key_opentopo: API key for OpenTopography
+    save_dem_raster: Whether to save the DEM as a GeoTIFF
+    output_dir: Output directory (defaults to ./outputs)
+        
+    Returns:
+        tuple: (dem_data, dem_meta) or None if failed
+    """
+    
+    # Setup output directory
+    if output_dir is None:
+        output_dir = str(Config.OUTPUT_DIR)
+    
+    # Attempt to retrieve data from OpenTopography 
+    dem_data = _load_from_opentopo(bounds, key_opentopo)
+    
+    if dem_data is None:
+        print("Failed to retrieve DEM from all sources.")
+        return None
+    
+    # Print metadata
+    crs = dem_data.rio.crs
+    data_min, data_max = dem_data.min(), dem_data.max()
+    print(f"CRS: {crs}")
+    print(f"Data range: {data_min:.2f}m to {data_max:.2f}m")
+    
+    dem_data = dem_data.squeeze() #Squeeze the raster into shape (x,y)
+    # Save if requested
+    if save_dem_raster:
+        file_path = os.path.join(output_dir, Config.DEM_FILENAME)
+        """Save raster data to file."""
+        print(f"Saving DEM to {file_path}")
+        try:
+            dem_data.rio.to_raster(file_path)
+        except Exception as e:
+            print(f"Failed to save file: {e}")
+ 
+    return dem_data
+
+
+def _load_from_opentopo(bounds, api_key):
+    """Load DEM from OpenTopography API and return as rioxarray with target CRS and resolution."""
+    print('Attempting to load DEM from OpenTopography.')
+    try:
+        west, south, east, north = map(str, bounds)
+        params = {
+            "demtype": "SRTMGL3",
+            "south": south,
+            "north": north,
+            "west": west,
+            "east": east,
+            "outputFormat": "GTiff",
+            "API_Key": api_key
+        }
+        
+        url = 'https://portal.opentopography.org/API/globaldem'
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        
+        with MemoryFile(response.content) as memfile:
+            with memfile.open() as src:
+                # Read directly as rioxarray
+                dem_raster = rioxarray.open_rasterio(src, masked=True)
+                # Load into memory to avoid issues when MemoryFile closes
+                dem_raster = dem_raster.load()
+               
+        return dem_raster
+    
+    except Exception as e:
+        print(f'Failed to load from OpenTopography: {e}')
+        return None

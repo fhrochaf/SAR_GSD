@@ -39,12 +39,8 @@ wheels/
 .env
 
 # Data files (large SAR imagery)
-data/raw/*
-data/processed/*
-data/external/*
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-!data/external/.gitkeep
+data/
+nul
 
 # Outputs
 outputs/*

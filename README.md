@@ -6,9 +6,11 @@ A Python package for detecting ground surface changes using Sentinel-1 SAR image
 
 - **Automated data acquisition** from Sentinel Hub API
 - **rioxarray-based datacubes** with full geospatial metadata
-- **Time series analysis** using linear regression
-- **Change detection** with configurable thresholds
-- **Publication-quality visualizations**
+- **Time series analysis** using linear regression with GPU acceleration
+- **Change detection** with configurable thresholds and p-value filtering
+- **DEM integration** with slope analysis from OpenTopography
+- **Zonal statistics** for vector-raster analysis
+- **Publication-quality visualizations** with matplotlib and Folium
 - **KML export** for Google Earth visualization
 - **Modular architecture** for easy extension
 
@@ -16,7 +18,8 @@ A Python package for detecting ground surface changes using Sentinel-1 SAR image
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.9+
+- CUDA-compatible GPU (optional, for accelerated processing)
 - Sentinel Hub account (free tier available)
 
 ### Setup
@@ -32,135 +35,167 @@ cd SAR_GSD
 pip install -r requirements.txt
 ```
 
-3. Configure credentials:
-   - Copy `.env.example` to `.env` (if exists) or create `.env` file
-   - Add your Sentinel Hub credentials:
-   ```
-   SENTINEL_HUB_CLIENT_ID=your_client_id
-   SENTINEL_HUB_CLIENT_SECRET=your_client_secret
-   ```
-   - Get free credentials at: https://apps.sentinel-hub.com/dashboard/
+3. Configure credentials in `.env` file:
+```env
+SENTINEL_HUB_CLIENT_ID=your_client_id
+SENTINEL_HUB_CLIENT_SECRET=your_client_secret
+KEY_OPEN_TOPOGRAPHY=your_opentopo_key
+```
+
+Get credentials at:
+- Sentinel Hub: https://apps.sentinel-hub.com/dashboard/
+- OpenTopography: https://opentopography.org/
 
 ## Quick Start
 
-### Using the Jupyter Notebook
-
-The easiest way to get started is with the example notebook:
-
-```bash
-jupyter notebook SARGSD_Example.ipynb
-```
-
-The notebook walks through the complete pipeline:
-1. Build SAR datacube from Sentinel-1 imagery
-2. Process time series to detect trends
-3. Generate visualizations
-4. Export results to KML and GeoTIFF
-
-### Using the Python Package
-
 ```python
-from SAR_GSD import Config, build_datacube, process_sar_timeseries
+from SAR_GSD import *
 
-# Define area of interest
-bbox = [-42.85, -19.65, -42.48, -19.40]  # [lon_min, lat_min, lon_max, lat_max]
+# Define area of interest [lon_min, lat_min, lon_max, lat_max]
+AOI_BBOX = [-42.85, -19.65, -42.48, -19.40]
 
-# Build datacube
+# Build datacube from Sentinel-1 time series
 datacube, dates = build_datacube(
-    bbox_coords=bbox,
+    bbox_coords=AOI_BBOX,
     start_date="2020-01-01",
     resolution=20,
-    max_dates=40
+    max_dates=30,
+    polarization="VV"
 )
 
-# Process time series
+# Process time series and detect changes
 results = process_sar_timeseries(
-    datacube=datacube,
-    threshold=0.07
+    datacube=datacube['backscatter'],
+    threshold=0.07,
+    verbose=True
 )
 
-# Access results
-trend = results['trend']
-positive_mask = results['positive_mask']
-negative_mask = results['negative_mask']
+# Export results
+save_all_outputs(
+    trend=results['trend'],
+    pvalues=results['pvalues'],
+    positive_mask=results['positive_mask'],
+    negative_mask=results['negative_mask'],
+    bbox=AOI_BBOX
+)
 ```
 
-## Project Structure
+## Package Structure
 
 ```
 SAR_GSD/
-├── SAR_GSD/              # Python package
-│   ├── __init__.py       # Package initialization
-│   ├── config.py         # Configuration management
-│   ├── download.py       # Data acquisition functions
-│   ├── processing.py     # Time series analysis
-│   ├── visualization.py  # Plotting functions
-│   └── export.py         # Export utilities (KML, GeoTIFF)
-├── outputs/              # Output directory (auto-created)
-├── SARGSD_Example.ipynb  # Example notebook
-├── .env                  # API credentials (not in git)
-├── .gitignore
-└── README.md
+    __init__.py          # Package exports
+    config.py            # Configuration management
+    download.py          # Sentinel-1 & DEM data acquisition
+    processing.py        # Time series analysis & change detection
+    visualization.py     # Plotting & Folium maps
+    export.py            # KML & GeoTIFF export
+    vector_ops.py        # Zonal statistics & vector operations
+    utils.py             # Utility functions
 ```
+
+## Main Functions
+
+### Data Acquisition
+
+| Function | Description |
+|----------|-------------|
+| `build_datacube()` | Build georeferenced xarray datacube from Sentinel-1 time series |
+| `get_available_s1_dates()` | Query available acquisition dates |
+| `request_s1_image()` | Download single Sentinel-1 image |
+| `get_dem()` | Download DEM from OpenTopography |
+
+### Processing
+
+| Function | Description |
+|----------|-------------|
+| `process_sar_timeseries()` | Complete pipeline: trend, smoothing, detection |
+| `calculate_slope()` | Compute slope from DEM data |
+| `get_device()` | Detect GPU/CPU for PyTorch acceleration |
+
+### Visualization
+
+| Function | Description |
+|----------|-------------|
+| `create_all_figures()` | Generate all standard matplotlib figures |
+| `display_Folium_map()` | Create interactive web map from GeoDataFrames |
+| `add_raster_to_folium()` | Add raster overlay to Folium map |
+| `plot_trend_map()` | Visualize temporal trend |
+| `plot_change_overlay()` | SAR intensity with change overlay |
+| `plot_sar_intensity()` | Single SAR intensity image |
+| `plot_time_series()` | Time series for specific pixel |
+| `plot_pvalues_map()` | P-values significance map |
+
+### Export
+
+| Function | Description |
+|----------|-------------|
+| `save_all_outputs()` | Save all GeoTIFF outputs |
+| `gdf_to_kml()` | Export GeoDataFrame to KML for Google Earth |
+| `launch_google_earth()` | Open one or more KML files in Google Earth Pro |
+
+### Vector Operations
+
+| Function | Description |
+|----------|-------------|
+| `zonal_statistics()` | Compute zonal stats for polygons against raster |
+| `vectorize_and_analyze_changes()` | Vectorize masks with slope/trend statistics |
+| `calculate_change_areas()` | Compute change areas within zones |
+| `buff_and_clip_geopackage()` | Buffer and clip vector data |
+| `vectorize_mask()` | Convert raster mask to vector polygons |
+
+### Utilities
+
+| Function | Description |
+|----------|-------------|
+| `launch_google_earth()` | Launch Google Earth with KML files |
+| `create_summary_report()` | Generate text summary of analysis |
 
 ## Configuration
 
-All configuration is managed through the `Config` class in `SAR_GSD/config.py`:
+All parameters are managed through the `Config` class:
 
 ```python
 from SAR_GSD import Config
 
-# Access settings
+# View current settings
+print(Config.CHANGE_THRESHOLD)   # 0.07
+print(Config.DEFAULT_RESOLUTION) # 20m
 print(Config.OUTPUT_DIR)
-print(Config.CHANGE_THRESHOLD)
-print(Config.DEFAULT_RESOLUTION)
 
-# Use predefined study areas
-area = Config.get_study_area('ipatinga_test')
-datacube, dates = build_datacube(**area)
+# Get output path
+path = Config.get_output_path("results.tif")
+
+# Validate credentials
+if Config.validate_sentinel_hub_credentials():
+    print("Credentials OK")
 ```
+
+### Key Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `CHANGE_THRESHOLD` | 0.07 | Trend threshold (log-units/year) |
+| `P_VALUE_THRESHOLD` | 0.05 | Statistical significance level |
+| `GAUSSIAN_SIGMA` | 1.5 | Spatial smoothing sigma (pixels) |
+| `MEAN_FILTER_SIZE` | 3 | Mean filter kernel size |
+| `DEFAULT_RESOLUTION` | 20 | Spatial resolution (meters) |
+| `MAX_DATES` | 40 | Maximum acquisitions to process |
+| `POLARIZATION` | VV | SAR polarization mode |
 
 ## Output Files
 
-All outputs are saved to the `outputs/` directory:
-
-| File | Description | Format |
-|------|-------------|--------|
-| `sar_datacube.nc` | Complete SAR time series | NetCDF |
-| `sar_latest.tif` | Most recent acquisition | GeoTIFF |
-| `sar_trend.tif` | Temporal trend map | GeoTIFF |
-| `positive_change_mask.tif` | Positive change mask | GeoTIFF |
-| `negative_change_mask.tif` | Negative change mask | GeoTIFF |
-| `sar_intensity.png` | Intensity visualization | PNG |
-| `sar_change_overlay.png` | Change overlay | PNG |
-| `sar_trend_map.png` | Trend visualization | PNG |
-| `sar_change_detection.kml` | Google Earth polygons | KML |
-| `summary.txt` | Analysis summary | Text |
-
-## Working with rioxarray
-
-The datacubes are fully compatible with rioxarray for geospatial operations:
-
-```python
-import xarray as xr
-
-# Load datacube
-datacube = xr.open_dataarray('outputs/sar_datacube.nc')
-
-# Select specific date
-img = datacube.sel(time='2023-01-15')
-
-# Clip to geometry
-import geopandas as gpd
-aoi = gpd.read_file('my_aoi.geojson')
-clipped = datacube.rio.clip(aoi.geometry, aoi.crs)
-
-# Reproject
-reprojected = datacube.rio.reproject('EPSG:3857')
-
-# Export
-datacube.isel(time=0).rio.to_raster('output.tif')
-```
+| File | Format | Description |
+|------|--------|-------------|
+| `sar_datacube.nc` | NetCDF | Time series datacube |
+| `sar_trend.tif` | GeoTIFF | Temporal trend map |
+| `sar_pvalues.tif` | GeoTIFF | P-values from regression |
+| `positive_change_mask.tif` | GeoTIFF | Positive change binary mask |
+| `negative_change_mask.tif` | GeoTIFF | Negative change binary mask |
+| `dem.tif` | GeoTIFF | Digital elevation model |
+| `slope.tif` | GeoTIFF | Slope map (degrees) |
+| `sar_change_detection.kml` | KML | Google Earth visualization |
+| `summary.txt` | Text | Analysis summary report |
 
 ## Methodology
 
@@ -171,121 +206,154 @@ The pipeline implements a log-ratio change detection approach:
 3. **Log Transformation**: Applies log10 to reduce multiplicative noise
 4. **Trend Analysis**: Fits linear regression to time series at each pixel
 5. **Spatial Smoothing**: Applies Gaussian + mean filters to reduce speckle
-6. **Thresholding**: Identifies pixels with |trend| > threshold
+6. **Thresholding**: Identifies pixels with |trend| > threshold AND p-value < 0.05
 
-**Interpretation:**
-- **Positive trend (blue)**: Increasing backscatter → construction, vegetation growth, surface roughening
-- **Negative trend (red)**: Decreasing backscatter → subsidence, deforestation, surface smoothing
+### Interpretation
 
-## API Reference
-
-### Main Functions
-
-#### `build_datacube(bbox_coords, start_date, resolution=20, ...)`
-Downloads and builds a georeferenced SAR datacube.
-
-#### `process_sar_timeseries(datacube, threshold=0.07, ...)`
-Analyzes time series and detects changes.
-
-#### `create_all_figures(datacube, trend, positive_mask, negative_mask, ...)`
-Generates all standard visualizations.
-
-#### `save_all_outputs(datacube, trend_da, positive_mask_da, ...)`
-Saves all output files (datacube, trend, masks, KML).
-
-See docstrings in each module for detailed API documentation.
+- **Positive trend (blue)**: Increasing backscatter - construction, vegetation growth, surface roughening
+- **Negative trend (red)**: Decreasing backscatter - subsidence, deforestation, surface smoothing
 
 ## Examples
 
-### Custom Study Area
+### Complete Workflow with DEM Analysis
 
 ```python
-from SAR_GSD import build_datacube, process_sar_timeseries
+from SAR_GSD import *
+import xarray as xr
 
-# Define custom AOI
-my_bbox = [-48.5, -15.8, -48.3, -15.6]
-
-# Build and process
-datacube, _ = build_datacube(
-    bbox_coords=my_bbox,
-    start_date="2021-01-01",
-    end_date="2023-12-31",
-    resolution=10,  # Higher resolution
-    max_dates=50
+# Build datacube
+datacube, dates = build_datacube(
+    bbox_coords=AOI_BBOX,
+    start_date="2020-01-01",
+    resolution=20,
+    max_dates=40
 )
 
-results = process_sar_timeseries(datacube, threshold=0.05)
+# Process SAR time series
+results = process_sar_timeseries(datacube['backscatter'], threshold=0.07)
+
+# Add results to datacube
+datacube["trend"] = (["y", "x"], results["trend"])
+datacube["positive_mask"] = (["y", "x"], results["positive_mask"])
+datacube["negative_mask"] = (["y", "x"], results["negative_mask"])
+
+# Download and add DEM
+dem = get_dem(AOI_BBOX)
+datacube["dem"] = (["y", "x"], dem.values)
+
+# Calculate slope
+slope = calculate_slope(datacube["dem"])
+datacube["slope"] = (["y", "x"], slope.values)
+
+# Create slope classes
+slope_classes = {1: "0-5", 2: "5-10", 3: "10-20", 4: "20-45", 5: "45-75", 6: "75-90"}
+datacube["slope_class"] = (["y", "x"], np.digitize(slope.values, [0, 5, 10, 20, 45, 75]))
+datacube["slope_class"].attrs['Slope classes'] = slope_classes
+
+# Vectorize changes with slope statistics
+gdf_changes = vectorize_and_analyze_changes(datacube, verbose=True)
 ```
 
-### Time Series Analysis at Specific Location
+### Zonal Statistics with Vector Data
 
 ```python
-from SAR_GSD import plot_time_series
+import geopandas as gpd
 
-# Plot time series for a specific pixel
-fig = plot_time_series(
-    datacube,
-    row=100,
-    col=150,
-    save_path="outputs/pixel_timeseries.png"
+# Load vector data
+gdf_zones = gpd.read_file("zones.gpkg")
+
+# Compute change areas within zones
+gdf_result = calculate_change_areas(
+    gdf_zones,
+    datacube["positive_mask"],
+    datacube["negative_mask"],
+    resolution=20,
+    output_path="outputs/zones_with_changes.gpkg"
 )
 ```
 
-### Batch Processing Multiple AOIs
+### Interactive Folium Map
 
 ```python
-from SAR_GSD import Config
+from SAR_GSD import display_Folium_map, add_raster_to_folium
 
-# Process all predefined study areas
-for area_name in Config.list_study_areas():
-    area = Config.get_study_area(area_name)
-    datacube, _ = build_datacube(**area)
-    results = process_sar_timeseries(datacube)
-    # Save with area-specific names...
+# Create map with vector layers
+geojson_display_dicts = [
+    {
+        'data': gdf_changes,
+        'name': 'SAR Changes',
+        'attribute_map': {
+            "change_type": "Change Type",
+            "mean_trend": "Mean Trend",
+            "total_area_ha": "Area (ha)"
+        },
+        'feature_settings': {
+            "fillColor": "blue",
+            "color": "black",
+            "weight": 1,
+            "fillOpacity": 0.5
+        }
+    }
+]
+
+fmap = display_Folium_map(geojson_display_dicts, zoom_start=12)
+
+# Add raster layer
+fmap = add_raster_to_folium(
+    fmap,
+    datacube["backscatter"][-1],
+    name="SAR Intensity",
+    cmap='gray',
+    log_transform=True
+)
+
+# Save map
+fmap.save("outputs/interactive_map.html")
+```
+
+### Export to KML
+
+```python
+from SAR_GSD import gdf_to_kml, launch_google_earth
+
+# Export GeoDataFrame to KML
+gdf_to_kml(
+    gdf_changes,
+    "outputs/changes.kml",
+    name_column="change_type",
+    description_columns=["mean_trend", "total_area_ha"],
+    color="ffff0000"  # Blue in KML format (AABBGGRR)
+)
+
+# Open multiple KMLs in Google Earth
+launch_google_earth([
+    "outputs/sar_change_detection.kml",
+    "outputs/changes.kml",
+    "outputs/zones.kml"
+])
 ```
 
 ## Requirements
 
-Key dependencies:
-- `numpy` - Numerical computing
-- `xarray` - Multi-dimensional arrays
-- `rioxarray` - Geospatial xarray extension
-- `rasterio` - Raster I/O
+Core dependencies:
+- `numpy`, `pandas`, `scipy` - Scientific computing
+- `xarray`, `rioxarray` - Multi-dimensional geospatial arrays
+- `geopandas`, `fiona`, `shapely` - Vector data handling
+- `rasterio`, `rasterstats` - Raster operations
 - `sentinelhub` - Sentinel Hub API
-- `matplotlib` - Plotting
-- `scipy` - Scientific computing
-- `torch` - Tensor operations (for convolutions)
+- `matplotlib`, `folium`, `branca` - Visualization
+- `torch` - GPU-accelerated convolutions
 - `simplekml` - KML generation
+- `Pillow` - Image processing
 - `python-dotenv` - Environment variables
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-[Add your license here]
-
-## Citation
-
-If you use this package in your research, please cite:
-
-```bibtex
-[Add citation information]
-```
-
-## Acknowledgments
-
-- Sentinel-1 data provided by ESA Copernicus programme
-- Sentinel Hub for API access
-- rioxarray developers
-
-## Contact
-
-[Add contact information]
+MIT License
 
 ## References
 
 - [Sentinel-1 Product Specification](https://sentinel.esa.int/web/sentinel/missions/sentinel-1)
 - [Sentinel Hub Documentation](https://docs.sentinel-hub.com/)
 - [rioxarray Documentation](https://corteva.github.io/rioxarray/)
+- [OpenTopography](https://opentopography.org/)

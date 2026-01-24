@@ -16,10 +16,10 @@ import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter
 from datetime import datetime
 from typing import Tuple, Optional
+from scipy import stats
 import time
 
 from .config import Config
-
 
 def get_device(verbose: bool = True) -> torch.device:
     """
@@ -45,13 +45,6 @@ def get_device(verbose: bool = True) -> torch.device:
             print(f"No GPU detected, using CPU")
 
     return device
-
-
-import numpy as np
-import xarray as xr
-from datetime import datetime
-from typing import Tuple
-from scipy import stats
 
 def compute_temporal_trend(
     datacube: xr.DataArray,
@@ -223,108 +216,11 @@ def apply_spatial_smoothing(
         print(f"  Output range: {np.nanmin(final_array):.4f} to {np.nanmax(final_array):.4f}")
 
     return final_array
-
-
-def create_trend_dataarray(
-    trend: np.ndarray,
-    datacube: xr.DataArray,
-    log_units: bool = True,
-    gaussian_sigma: float = Config.GAUSSIAN_SIGMA,
-    mean_filter_size: int = Config.MEAN_FILTER_SIZE,
-) -> xr.DataArray:
-    """
-    Package trend array as xarray DataArray with proper coordinates and metadata.
-
-    Args:
-        trend: 2D trend array
-        datacube: Original datacube (used to extract coordinates)
-        log_units: Whether trend is in log-intensity units (for metadata)
-        gaussian_sigma: Gaussian filter sigma used (for metadata)
-        mean_filter_size: Mean filter size used (for metadata)
-
-    Returns:
-        xarray DataArray with geospatial coordinates and CRS
-
-    Example:
-        >>> trend_da = create_trend_dataarray(trend, datacube, log_units=True)
-        >>> trend_da.rio.to_raster("outputs/trend.tif")
-    """
-    # Create DataArray with same spatial coordinates as original datacube
-    trend_da = xr.DataArray(
-        trend,
-        dims=["y", "x"],
-        coords={
-            "y": datacube.y,
-            "x": datacube.x,
-        },
-        attrs={
-            "description": "Linear trend in SAR backscatter intensity",
-            "units": "log10-units per year" if log_units else "intensity-units per year",
-            "method": "Ordinary least squares regression with spatial smoothing",
-            "gaussian_sigma": gaussian_sigma,
-            "mean_filter_size": f"{mean_filter_size}x{mean_filter_size}",
-            "processing_date": datetime.now().isoformat(),
-            "start_date": str(datacube.time.values[0])[:10],
-            "end_date": str(datacube.time.values[-1])[:10],
-            "n_acquisitions": len(datacube.time),
-        },
-    )
-
-    # Add CRS information
-    trend_da = trend_da.rio.write_crs("EPSG:4326")
-    trend_da = trend_da.rio.set_spatial_dims(x_dim="x", y_dim="y")
-
-    return trend_da
-
-
-def create_pvalues_dataarray(
-    p_values: np.ndarray,
-    datacube: xr.DataArray,
-) -> xr.DataArray:
-    """
-    Package p-values array as xarray DataArray with proper coordinates and metadata.
-
-    Args:
-        p_values: 2D p-values array from trend analysis
-        datacube: Original datacube (used to extract coordinates)
-
-    Returns:
-        xarray DataArray with geospatial coordinates and CRS
-
-    Example:
-        >>> pvals_da = create_pvalues_dataarray(p_values, datacube)
-        >>> pvals_da.rio.to_raster("outputs/p_values.tif")
-        >>> significant = pvals_da < 0.05  # Create significance mask
-    """
-    # Create DataArray with same spatial coordinates as original datacube
-    pvals_da = xr.DataArray(
-        p_values,
-        dims=["y", "x"],
-        coords={
-            "y": datacube.y,
-            "x": datacube.x,
-        },
-        attrs={
-            "description": "P-values for linear trend in SAR backscatter intensity",
-            "units": "probability",
-            "method": "Two-tailed t-test from ordinary least squares regression",
-            "interpretation": "p < 0.05 indicates statistically significant trend at 95% confidence",
-            "processing_date": datetime.now().isoformat(),
-            "start_date": str(datacube.time.values[0])[:10],
-            "end_date": str(datacube.time.values[-1])[:10],
-            "n_acquisitions": len(datacube.time),
-        },
-    )
-
-    # Add CRS information
-    pvals_da = pvals_da.rio.write_crs("EPSG:4326")
-    pvals_da = pvals_da.rio.set_spatial_dims(x_dim="x", y_dim="y")
-
-    return pvals_da
-    
+   
 
 def detect_changes(
     trend: np.ndarray,
+    pvalues: np.ndarray,
     threshold: Optional[float] = None,
     verbose: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -333,6 +229,7 @@ def detect_changes(
 
     Args:
         trend: 2D trend array (e.g., from compute_temporal_trend)
+        pvalues: 2D p-value array (e.g., from compute_temporal_trend)
         threshold: Change threshold. Pixels with |trend| > threshold are marked as changed.
                    If None, uses Config.CHANGE_THRESHOLD.
         verbose: Print statistics (default: True)
@@ -350,8 +247,8 @@ def detect_changes(
         threshold = Config.CHANGE_THRESHOLD
 
     # Apply threshold to identify significant changes
-    positive_mask = trend > threshold
-    negative_mask = trend < -threshold
+    positive_mask = (trend > threshold) & (pvalues < Config.P_VALUE_THRESHOLD)
+    negative_mask = (trend < -threshold) & (pvalues < Config.P_VALUE_THRESHOLD)
 
     if verbose:
         n_positive = np.sum(positive_mask)
@@ -366,51 +263,6 @@ def detect_changes(
         print(f"  Stable areas: {n_stable} pixels ({100*n_stable/total_pixels:.2f}%)")
 
     return positive_mask, negative_mask
-
-
-def create_mask_dataarray(
-    mask: np.ndarray,
-    datacube: xr.DataArray,
-    mask_type: str,
-    threshold: float,
-) -> xr.DataArray:
-    """
-    Package mask array as xarray DataArray with proper coordinates and metadata.
-
-    Args:
-        mask: 2D boolean mask array
-        datacube: Original datacube (used to extract coordinates)
-        mask_type: Type of mask ('positive' or 'negative')
-        threshold: Threshold value used to generate mask
-
-    Returns:
-        xarray DataArray with geospatial coordinates and CRS
-
-    Example:
-        >>> pos_mask_da = create_mask_dataarray(positive_mask, datacube, 'positive', 0.07)
-        >>> pos_mask_da.rio.to_raster("outputs/positive_mask.tif")
-    """
-    # Create DataArray
-    mask_da = xr.DataArray(
-        mask.astype(np.uint8),
-        dims=["y", "x"],
-        coords={
-            "y": datacube.y,
-            "x": datacube.x,
-        },
-        attrs={
-            "description": f"{mask_type.capitalize()} change mask",
-            "threshold": threshold if mask_type == "positive" else -threshold,
-            "units": "binary (0=no change, 1=change detected)",
-            "processing_date": datetime.now().isoformat(),
-        },
-    )
-
-    # Add CRS information
-    mask_da = mask_da.rio.write_crs("EPSG:4326")
-    mask_da = mask_da.rio.set_spatial_dims(x_dim="x", y_dim="y")
-
-    return mask_da
 
 
 def process_sar_timeseries(
@@ -436,10 +288,8 @@ def process_sar_timeseries(
 
     Returns:
         Dictionary containing:
-        - 'trend': Smoothed trend array (2D numpy array)
         - 'trend_da': Trend as xarray DataArray
-        - 'positive_mask': Boolean mask of positive changes
-        - 'negative_mask': Boolean mask of negative changes
+        - 'pvalues_da': P-values as xarray DataArray
         - 'positive_mask_da': Positive mask as xarray DataArray
         - 'negative_mask_da': Negative mask as xarray DataArray
         - 'time_array': Time coordinates in years
@@ -459,7 +309,7 @@ def process_sar_timeseries(
 
     # Step 1: Compute temporal trend
     if verbose:
-        print("\n[1/4] Computing temporal trend...")
+        print("\n[1/3] Computing temporal trend...")
     start_time = time.time()
     trend_raw, p_values, time_array = compute_temporal_trend(datacube, log_transform=True, verbose=verbose)
     end_time = time.time()
@@ -468,7 +318,7 @@ def process_sar_timeseries(
 
     # Step 2: Apply spatial smoothing
     if verbose:
-        print("\n[2/4] Applying spatial smoothing...")
+        print("\n[2/3] Applying spatial smoothing...")
     start_time = time.time()
     trend = apply_spatial_smoothing(
         trend_raw, gaussian_sigma=gaussian_sigma, mean_filter_size=mean_filter_size, device=device, verbose=verbose
@@ -479,46 +329,61 @@ def process_sar_timeseries(
 
     # Step 3: Detect changes
     if verbose:
-        print("\n[3/4] Detecting changes...")
+        print("\n[3/3] Detecting changes...")
     start_time = time.time()
-    positive_mask, negative_mask = detect_changes(trend, threshold=threshold, verbose=verbose)
+    positive_mask, negative_mask = detect_changes(trend, p_values, threshold=threshold, verbose=verbose)
     end_time = time.time()
     if verbose:
         print(f"Change detection completed in {end_time - start_time:.2f} seconds")
 
-    # Step 4: Create georeferenced DataArrays
-    if verbose:
-        print("\n[4/4] Creating georeferenced outputs...")
-    start_time = time.time()
-
-    trend_da = create_trend_dataarray(
-        trend,
-        datacube,
-        log_units=True,
-        gaussian_sigma=gaussian_sigma or Config.GAUSSIAN_SIGMA,
-        mean_filter_size=mean_filter_size or Config.MEAN_FILTER_SIZE,
-    )
-
-    pvalues_da = create_pvalues_dataarray(
-        p_values,
-        datacube)
-
-    positive_mask_da = create_mask_dataarray(positive_mask, datacube, "positive", threshold)
-    negative_mask_da = create_mask_dataarray(negative_mask, datacube, "negative", threshold)
-
-    end_time = time.time()
-    if verbose:
-        print(f"Georeferenced outputs created in {end_time - start_time:.2f} seconds")
-        print("\n✓ Processing complete!")
-        print("=" * 60)
 
     return {
         "trend": trend,
-        "pvalues_da": pvalues_da,
-        "trend_da": trend_da,
+        "pvalues": p_values,
         "positive_mask": positive_mask,
         "negative_mask": negative_mask,
-        "positive_mask_da": positive_mask_da,
-        "negative_mask_da": negative_mask_da,
         "time_array": time_array,
     }
+
+
+def calculate_slope(dem_da: xr.DataArray,
+                    path_slope: str = None,
+                    mode:str = 'deg'):
+    """
+    Calculate slope from DEM data.
+
+    dem: Path to the DEM file
+    path_slope: Path to the output slope file
+    mode: 'perc' or 'deg'
+    """
+
+    if path_slope is None:
+        path_slope = Config.get_output_path(Config.SLOPE_FILENAME)
+
+    # Get the data array (first band)
+    # Corrected: Use dem_da.values directly if dem_da is already 2D
+    dem = dem_da.values
+
+    # Get cell size from the transform
+    dx = abs(dem_da.rio.resolution()[0])  # pixel width
+    dy = abs(dem_da.rio.resolution()[1])  # pixel height
+
+    # Calculate gradients using numpy gradient
+    dz_dx, dz_dy = np.gradient(dem, dx, dy)
+
+    if mode == 'perc':
+        # Calculate slope in percentage
+        slope = np.sqrt(dz_dx**2 + dz_dy**2) * 100
+    elif mode == 'deg':
+    # Calculate slope in degrees
+        slope = np.arctan(np.sqrt(dz_dx**2 + dz_dy**2)) * (180 / np.pi)
+
+    # Create a new DataArray with the slope data
+    slope_da = dem_da.copy()
+    slope_da.values = slope # Assign the 2D slope array
+    slope_da.name = 'slope'
+
+    # Write output
+    slope_da.squeeze().rio.to_raster(path_slope, dtype='float32')
+
+    return slope_da

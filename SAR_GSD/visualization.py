@@ -11,9 +11,15 @@ This module provides functions to:
 import numpy as np
 import matplotlib.pyplot as plt
 import xarray as xr
-import rioxarray  # IMPORTANT: This registers the .rio accessor for xarray
+import rioxarray  # Registers the .rio accessor for xarray
 from typing import Optional, Tuple
 from pathlib import Path
+import folium
+import branca.colormap as cm
+from io import BytesIO
+from PIL import Image
+import base64
+
 
 from .config import Config
 
@@ -159,9 +165,6 @@ def plot_change_overlay(
     overlay = np.zeros((*img.shape, 4))
     overlay[positive_mask] = positive_color
     overlay[negative_mask] = negative_color
-
-    # Get acquisition date
-    date_str = str(datacube.time.values[time_index])[:10]
 
     # Create figure
     fig, ax = plt.subplots(figsize=figsize)
@@ -537,3 +540,183 @@ def create_all_figures(
     print("All figures generated!")
 
     return figures
+
+
+def display_Folium_map(geojson_display_dicts, zoom_start: int = 6):
+    """
+    Creates a Folium map from a GeoDataFrame, with hover and popup attributes.
+    It will center on the first GeoDataFrame of the list
+
+    geojson_display_dict = dictionary with geodataframes mapped to keyworded arguments to be passed to
+    folium.GeoJson(...)
+
+    zoom_start = Initial zoom level for the map.
+    """
+
+    print('Creating a Folium Map visualization.')
+
+    # Define CRS projection to WGS 84 (Folium Standard)
+    for i, dict in enumerate(geojson_display_dicts):
+        if dict['data'].crs != 4326:
+            dict['data'] = dict['data'].to_crs(epsg=4326)
+
+    # Calculate map center
+    center = [
+        geojson_display_dicts[0]['data'].geometry.centroid.y.mean(),
+        geojson_display_dicts[0]['data'].geometry.centroid.x.mean()
+    ]
+
+    # Initialize map
+    fmap = folium.Map(
+        location=center,
+        zoom_start=zoom_start,
+        tiles="OpenStreetMap"
+    )
+
+    for i in range(len(geojson_display_dicts)):
+        #Check if the layer is of point type
+        is_point_layer = geojson_display_dicts[i]['data'].geometry.iloc[0].geom_type == "Point"
+
+        # Tooltip (hover)
+        if 'attribute_map' in geojson_display_dicts[i]:
+            tooltip = folium.GeoJsonTooltip(
+                fields=list(geojson_display_dicts[i]['attribute_map'].keys()),
+                aliases=[f"{label}:" for label in geojson_display_dicts[i]['attribute_map'].values()],
+                localize=True
+            )
+
+            # Popup (click)
+            popup = folium.GeoJsonPopup(
+                fields=list(geojson_display_dicts[i]['attribute_map'].keys()),
+                aliases=[f"{label}:" for label in geojson_display_dicts[i]['attribute_map'].values()],
+                localize=True
+            )
+        else:
+            tooltip = None
+            popup = None
+
+        # Define style - use static style dict or callable style function
+        feature_settings = geojson_display_dicts[i].get('feature_settings', None)
+
+        # Build GeoJson kwargs
+        geojson_kwargs = {
+            'data': geojson_display_dicts[i]['data'],
+            'name': geojson_display_dicts[i].get('name', f'Layer {i}'),
+            'zoom_on_click': True,
+            'tooltip': tooltip,
+            'marker': geojson_display_dicts[i].get('marker', None),
+            'popup': popup,
+            'highlight_function': geojson_display_dicts[i].get('highlight_function', None),
+            'popup_keep_highlighted': True
+        }
+
+        # Apply styling for non-point layers
+        if not is_point_layer and feature_settings is not None:
+            if callable(feature_settings):
+                # User provided a style function
+                geojson_kwargs['style_function'] = feature_settings
+            else:
+                # Use 'style' parameter for static styles (Folium >= 0.14)
+                geojson_kwargs['style'] = feature_settings
+
+        # Add geospatial data to map
+        folium.GeoJson(**geojson_kwargs).add_to(fmap)
+
+    return fmap
+
+
+def add_raster_to_folium(fmap, raster_data, name="Raster Layer", opacity=0.6, 
+                         cmap='gray', vmin=None, vmax=None, percentile_clip=(2, 98),
+                         log_transform=False, nodata_value=None):
+    """
+    Add a raster layer to an existing Folium map with automatic reprojection.
+    
+    Parameters:
+    -----------
+    fmap : folium.Map
+        Existing Folium map object to add the raster to
+    raster_data : xarray.DataArray
+        Raster data with rio accessor (rioxarray)
+    name : str
+        Name of the layer for layer control
+    opacity : float
+        Opacity of the raster overlay (0-1)
+    cmap : str or matplotlib.colors.Colormap
+        Matplotlib colormap name or object (e.g., 'gray', 'RdYlBu', 'viridis')
+    vmin : float, optional
+        Minimum value for colormap normalization. If None, uses percentile_clip
+    vmax : float, optional
+        Maximum value for colormap normalization. If None, uses percentile_clip
+    percentile_clip : tuple
+        Percentiles to clip data for display (min, max). Only used if vmin/vmax not provided
+    log_transform : bool
+        Whether to apply log10 transformation (useful for SAR data)
+    nodata_value : float, optional
+        Value to treat as nodata (will be transparent). If None, uses NaN
+    
+    Returns:
+    --------
+    folium.Map
+        The map object with the raster layer added
+    """
+    
+    # Reproject to WGS84 if needed (Folium standard)
+    if raster_data.rio.crs != "EPSG:4326":
+        print(f"Reprojecting from {raster_data.rio.crs} to EPSG:4326...")
+        raster_data = raster_data.rio.reproject("EPSG:4326")
+    
+    # Get bounds in Folium format [[south, west], [north, east]]
+    bounds = raster_data.rio.bounds()  # (minx, miny, maxx, maxy)
+    bounds_folium = [[bounds[1], bounds[0]], [bounds[3], bounds[2]]]
+    
+    # Get data as numpy array
+    data = raster_data.to_numpy()
+    
+    # Handle nodata
+    if nodata_value is not None:
+        data = np.where(data == nodata_value, np.nan, data)
+    
+    # Apply log transformation if requested
+    if log_transform:
+        data = np.log10(data + 1e-10)  # Add small value to avoid log(0)
+    
+    # Normalize data
+    if vmin is None or vmax is None:
+        vmin_calc, vmax_calc = np.nanpercentile(data, percentile_clip)
+        vmin = vmin if vmin is not None else vmin_calc
+        vmax = vmax if vmax is not None else vmax_calc
+    
+    data_norm = np.clip((data - vmin) / (vmax - vmin), 0, 1)
+    
+    # Get colormap
+    if isinstance(cmap, str):
+        cmap_obj = plt.get_cmap(cmap)
+    else:
+        cmap_obj = cmap
+    
+    # Apply colormap
+    rgba = cmap_obj(data_norm)
+    
+    # Set NaN values to transparent
+    rgba[np.isnan(data)] = [0, 0, 0, 0]
+    
+    # Convert to uint8 image
+    img = Image.fromarray((rgba * 255).astype(np.uint8), mode='RGBA')
+    
+    # Convert to base64 for Folium
+    buffer = BytesIO()
+    img.save(buffer, format='PNG')
+    img_str = base64.b64encode(buffer.getvalue()).decode()
+    
+    # Add to Folium map
+    folium.raster_layers.ImageOverlay(
+        image=f"data:image/png;base64,{img_str}",
+        bounds=bounds_folium,
+        opacity=opacity,
+        name=name,
+        interactive=True,
+        cross_origin=False
+    ).add_to(fmap)
+    
+    print(f"Added raster layer '{name}' to map")
+    return fmap
