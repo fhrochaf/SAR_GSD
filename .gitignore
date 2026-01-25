@@ -39,7 +39,6 @@ wheels/
 .env
 
 # Data files (large SAR imagery)
-data/
 nul
 
 # Outputs
@@ -69,4 +68,4 @@ docs/_build/
 _temp/
 _sar_gsd_notimplemented/
 outputs/
-docs/
+.claude/
