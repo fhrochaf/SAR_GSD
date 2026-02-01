@@ -210,7 +210,6 @@ def gdf_to_kml(
 
 def save_all_outputs(
     trend: np.ndarray,
-    pvalues: np.ndarray,
     positive_mask: np.ndarray,
     negative_mask: np.ndarray,
     bbox: List[float],
@@ -222,7 +221,6 @@ def save_all_outputs(
 
     Args:
         trend: Numpy array with trend values
-        pvalues: Numpy array with p-value values
         positive_mask: Numpy array with positive change mask
         negative_mask: Numpy array with negative change mask
         bbox: Bounding box as [lon_min, lat_min, lon_max, lat_max]
@@ -253,15 +251,6 @@ def save_all_outputs(
     outputs["trend"] = trend_path
     if verbose:
         print(f"  ✓ {trend_path}")
-
-    # Save pvalues map as GeoTIFF
-    if verbose:
-        print("\nSaving pvalues map (GeoTIFF)...")
-    pvalues_path = os.path.join(output_dir, Config.PVALUES_MAP_FILENAME)
-    pvalues.rio.to_raster(pvalues_path)
-    outputs["pvalues"] = pvalues_path
-    if verbose:
-        print(f"  ✓ {pvalues_path}")
 
     # Save positive mask as GeoTIFF
     if verbose:

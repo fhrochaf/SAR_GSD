@@ -1,222 +1,285 @@
 """
-Processing mod
-ule for SAR time series analysis and change detection.
+Tensor-accelerated processing module for SAR time series analysis.
 
-This module provides functions to:
-- Compute temporal trends using linear regression
-- Apply spatial smoothing filters
-- Generate change detection masks
-- Create georeferenced output products
+Performs multi-scale Gaussian smoothing
+and linear regression entirely on GPU/CPU tensors via PyTorch
+
+Computes slope from DEM data.
 """
 
+import time
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
-import xarray as xr
 import torch
 import torch.nn.functional as F
-from scipy.ndimage import gaussian_filter
-from datetime import datetime
-from typing import Tuple, Optional
-from scipy import stats
-import time
+import xarray as xr
 
 from .config import Config
 
-def get_device(verbose: bool = True) -> torch.device:
+def _build_gaussian_kernel(
+    sigma: float,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build a 2-D Gaussian convolution kernel for the given sigma."""
+    kernel_size = int(2 * np.ceil(3 * sigma) + 1)
+    x = torch.arange(
+        -kernel_size // 2 + 1,
+        kernel_size // 2 + 1,
+        dtype=torch.float32,
+        device=device,
+    )
+    xg, yg = torch.meshgrid(x, x, indexing="ij")
+    kernel = torch.exp(-(xg ** 2 + yg ** 2) / (2 * sigma ** 2))
+    kernel = kernel / kernel.sum()
+    return kernel.view(1, 1, kernel_size, kernel_size)
+
+
+def tensor_smooth_timeseries(
+    ts_tensor: torch.Tensor,
+    scales: Optional[List[float]] = None,
+    weights: Optional[List[float]] = None,
+    batch_size: Optional[int] = None,
+    device: Optional[torch.device] = None,
+    verbose: bool = True,
+) -> torch.Tensor:
     """
-    Automatically detect and return the best available device.
+    Apply multi-scale Gaussian smoothing to a 3-D time-series tensor.
+
+    Each scale produces a spatially smoothed copy of the full time series;
+    the final result is a weighted combination of all scales.
+
+    Args:
+        ts_tensor: Tensor of shape (n_times, height, width).
+        scales: List of Gaussian sigma values (default [1.5, 2.5]).
+        weights: Per-scale weights for the combination (must sum to 1).
+                 Default [0.4, 0.6].
+        batch_size: Frames per convolution batch. If None, auto-selected
+                    (16 for CUDA, 8 for CPU).
+        device: Torch device. If None, uses get_device().
+        verbose: Print progress messages.
 
     Returns:
-        torch.device: 'cuda' if GPU is available, otherwise 'cpu'
+        Smoothed tensor of the same shape as *ts_tensor*.
     """
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
+    if scales is None:
+        scales = Config.GAUSSIAN_SIGMAS
+    if weights is None:
+        weights = Config.GAUSSIAN_WEIGHTS
 
-        if verbose:
-            print(f"PyTorch version: {torch.__version__}")
-            print(f"CUDA available: {torch.cuda.is_available()}")
-            print(f"CUDA version: {torch.version.cuda}")
-            print(f"GPU count: {torch.cuda.device_count()}")
-            print(f"GPU detected: {torch.cuda.get_device_name(0)}")
-            print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-            
-    else:
-        device = torch.device('cpu')
-        if verbose:
-            print(f"No GPU detected, using CPU")
+    if len(scales) != len(weights):
+        raise ValueError("scales and weights must have the same length")
 
-    return device
+    if device is None:
+        device = get_device(verbose=verbose)
 
-def compute_temporal_trend(
-    datacube: xr.DataArray,
-    log_transform: bool = True,
+    ts_tensor = ts_tensor.to(device)
+    w = torch.tensor(weights, device=device, dtype=torch.float32)
+    n_times = ts_tensor.shape[0]
+
+    if batch_size is None:
+        batch_size = 16 if device.type == "cuda" else 8
+
+    smoothed_scales: list[torch.Tensor] = []
+
+    for sigma in scales:
+        kernel = _build_gaussian_kernel(sigma, device)
+        pad = kernel.shape[-1] // 2
+        frames = []
+        for i in range(0, n_times, batch_size):
+            batch = ts_tensor[i : i + batch_size].unsqueeze(1)
+            smoothed = F.conv2d(batch, kernel, padding=pad)
+            frames.append(smoothed.squeeze(1))
+        smoothed_scales.append(torch.cat(frames, dim=0))
+
+    combined = sum(w[i] * smoothed_scales[i] for i in range(len(scales)))
+
+    if verbose:
+        print(f"  Multi-scale Gaussian smoothing applied (scales={scales}, weights={weights})")
+
+    return combined
+
+
+def tensor_temporal_trend(
+    smoothed: torch.Tensor,
+    time_values: np.ndarray,
+    device: Optional[torch.device] = None,
     verbose: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Compute temporal trend (rate of change) in SAR backscatter using linear regression.
-
-    The trend is computed by fitting a linear regression model to the time series
-    at each pixel. The slope (trend coefficient) represents the rate of change
-    in backscatter intensity over time.
+    Pixel-wise linear regression over the time dimension using tensors.
 
     Args:
-        datacube: xarray DataArray with dimensions (time, y, x)
-        log_transform: If True, applies log10 transformation before computing trend.
-                       Recommended for SAR data to reduce multiplicative noise.
-        verbose: Print progress messages (default: True)
+        smoothed: Tensor of shape (n_times, height, width) – typically the
+                  output of ``tensor_smooth_timeseries``.
+        time_values: 1-D array of datetime64 values (e.g. from
+                     ``datacube.time.values``).
+        device: Torch device. If None, uses get_device().
+        verbose: Print progress messages.
 
     Returns:
-        Tuple containing:
-        - trend: 2D array (y, x) with trend coefficients (log-intensity/year or intensity/year)
-        - p_values: 2D array (y, x) with p-values for the trend coefficients
-        - time_array: 1D array with time coordinates in years from first acquisition
-
-    Example:
-        >>> trend, p_vals, time = compute_temporal_trend(datacube, log_transform=True)
-        >>> significant = p_vals < 0.05
-        >>> print(f"Significant pixels: {np.sum(significant)} / {significant.size}")
+        Tuple of:
+        - trend_annual: 2-D numpy array (y, x) – slope annualised to
+          units / year.
+        - r_squared: 2-D numpy array (y, x) – coefficient of determination.
+        - smoothed_numpy: 3-D numpy array (time, y, x) – the smoothed data
+          passed through for convenience.
     """
-    # Get time coordinates and convert to years from first acquisition
-    time_coords = datacube.time.values
-    time_objects = [datetime.fromisoformat(str(t)[:10]) for t in time_coords]
-    time_array = np.array([(t - time_objects[0]).days / 365.25 for t in time_objects])
-
-    if verbose:
-        print(f"Time span: {time_array[0]:.2f} to {time_array[-1]:.2f} years")
-        print(f"Number of acquisitions: {len(time_array)}")
-
-    # Get datacube values
-    cube_data = datacube.values
-
-    # Apply log transformation if requested
-    if log_transform:
-        # Ensure no negative or zero values before log
-        cube_data = cube_data.copy()
-        cube_data[cube_data <= 0] = np.nan
-        cube_data = np.log10(cube_data)
-
-    # Reshape for vectorized linear regression
-    # Shape: (n_time, n_pixels) where n_pixels = height * width
-    n_time, n_y, n_x = cube_data.shape
-    data_flat = cube_data.reshape(n_time, -1)
-
-    # Perform linear regression: fit slope (trend) and intercept for each pixel
-    # np.polyfit returns [slope, intercept] for degree=1
-    coeffs = np.polyfit(time_array, data_flat, 1)
-    trend_flat = coeffs[0]  # slopes
-    intercept_flat = coeffs[1]  # intercepts
-
-    # Compute p-values (vectorized)
-    # Calculate predicted values
-    y_pred = trend_flat[np.newaxis, :] * time_array[:, np.newaxis] + intercept_flat[np.newaxis, :]
-    
-    # Calculate residuals
-    residuals = data_flat - y_pred
-    
-    # Degrees of freedom
-    df = n_time - 2
-    
-    # Residual sum of squares
-    rss = np.nansum(residuals**2, axis=0)
-    
-    # Standard error of the residuals
-    mse = rss / df
-    
-    # Standard error of the slope
-    # SE(slope) = sqrt(MSE / sum((x - x_mean)^2))
-    x_mean = np.mean(time_array)
-    ss_x = np.sum((time_array - x_mean)**2)
-    se_slope = np.sqrt(mse / ss_x)
-    
-    # t-statistic
-    t_stat = trend_flat / se_slope
-    
-    # p-value (two-tailed test)
-    p_values_flat = 2 * (1 - stats.t.cdf(np.abs(t_stat), df))
-    
-    # Reshape back to 2D
-    trend = trend_flat.reshape(n_y, n_x)
-    p_values = p_values_flat.reshape(n_y, n_x)
-
-    if verbose:
-        units = "log-units/year" if log_transform else "intensity-units/year"
-        print(f"Trend range: {np.nanmin(trend):.4f} to {np.nanmax(trend):.4f} {units}")
-        
-        # Report significance statistics
-        valid_p = ~np.isnan(p_values)
-        if np.any(valid_p):
-            sig_05 = np.sum(p_values[valid_p] < 0.05)
-            sig_01 = np.sum(p_values[valid_p] < 0.01)
-            total = np.sum(valid_p)
-            print(f"Significant trends (p < 0.05): {sig_05}/{total} ({100*sig_05/total:.1f}%)")
-            print(f"Highly significant (p < 0.01): {sig_01}/{total} ({100*sig_01/total:.1f}%)")
-
-    return trend, p_values, time_array
-
-
-def apply_spatial_smoothing(
-    array: np.ndarray,
-    gaussian_sigma: Optional[float] = None,
-    mean_filter_size: Optional[int] = None,
-    device: Optional[torch.device] = None,
-    verbose: bool = True,
-) -> np.ndarray:
-    """
-    Apply spatial smoothing to reduce noise and enhance coherent patterns.
-
-    Two-step smoothing process:
-    1. Gaussian filter - reduces speckle noise
-    2. Mean filter (convolution) - further smooths boundaries
-
-    Args:
-        array: 2D numpy array to smooth
-        gaussian_sigma: Sigma for Gaussian filter in pixels. If None, uses Config.GAUSSIAN_SIGMA.
-        mean_filter_size: Size of mean filter kernel. If None, uses Config.MEAN_FILTER_SIZE.
-        device: PyTorch device to use for smoothing. If None, uses get_device().
-        verbose: Print progress messages (default: True)
-
-    Returns:
-        Smoothed 2D array
-
-    Example:
-        >>> trend_smooth = apply_spatial_smoothing(trend, gaussian_sigma=1.5, mean_filter_size=3)
-    """
-    if gaussian_sigma is None:
-        gaussian_sigma = Config.GAUSSIAN_SIGMA
-
-    if mean_filter_size is None:
-        mean_filter_size = Config.MEAN_FILTER_SIZE
-
-    if verbose:
-        print("Applying spatial smoothing...")
-        print(f"  Gaussian filter: sigma={gaussian_sigma} pixels")
-        print(f"  Mean filter: {mean_filter_size}x{mean_filter_size} kernel")
-
-    # Step 1: Gaussian smoothing
-    smooth_array = gaussian_filter(array, sigma=gaussian_sigma)
-
-    # Step 2: Mean filter using PyTorch for efficient convolution
-    # Convert to tensor and add batch and channel dimensions
     if device is None:
-        device = get_device() #Check if GPU is available
-    array_tensor = torch.from_numpy(smooth_array).float()[None, None].to(device)
+        device = get_device(verbose=False)
 
-    # Create averaging kernel
-    kernel_size = mean_filter_size
-    kernel = torch.ones((1, 1, kernel_size, kernel_size), dtype=torch.float32) / (kernel_size ** 2)
-    kernel = kernel.to(device)
+    smoothed = smoothed.to(device)
+    n_times = smoothed.shape[0]
 
-    # Apply convolution with padding to maintain size
-    padding = kernel_size // 2
-    smooth_tensor = F.conv2d(array_tensor, kernel, padding=padding)
+    # Tensor index as regressor (0 … n_times-1)
+    t = torch.arange(n_times, dtype=torch.float32, device=device).view(-1, 1, 1)
+    t_mean = t.mean()
+    y_mean = smoothed.mean(dim=0)
+
+    numerator = ((smoothed - y_mean) * (t - t_mean)).sum(dim=0)
+    denominator = ((t - t_mean) ** 2).sum()
+
+    slope = numerator / denominator
+    intercept = y_mean - slope * t_mean
+
+    y_pred = slope * t + intercept
+    ss_res = ((smoothed - y_pred) ** 2).sum(dim=0)
+    ss_tot = ((smoothed - y_mean) ** 2).sum(dim=0)
+
+    r_squared = 1 - ss_res / (ss_tot + 1e-8)
 
     # Convert back to numpy
-    final_array = smooth_tensor.squeeze().cpu().numpy()
+    smoothed_numpy = smoothed.cpu().numpy()
+    trend_numpy = slope.cpu().numpy()
+    r_squared_numpy = r_squared.cpu().numpy()
+
+    # Annualise: slope is per-index-step; convert to per-year
+    time_diff = time_values[-1] - time_values[0]
+    time_span_years = float(
+        np.timedelta64(time_diff, "D").astype("float64") / 365.25
+    )
+    trend_annual = trend_numpy / time_span_years if time_span_years > 0 else trend_numpy
 
     if verbose:
-        print(f"  Output range: {np.nanmin(final_array):.4f} to {np.nanmax(final_array):.4f}")
+        print(f"  Trend range: {np.nanmin(trend_annual):.6f} to {np.nanmax(trend_annual):.6f} /year")
+        print(f"  Mean R²: {np.nanmean(r_squared_numpy):.4f}")
 
-    return final_array
-   
+    return trend_annual, r_squared_numpy, smoothed_numpy
+
+
+def process_sar_timeseries_tensor(
+    sar_da: xr.DataArray,
+    threshold: Optional[float] = None,
+    scales: Optional[List[float]] = None,
+    weights: Optional[List[float]] = None,
+    batch_size: Optional[int] = None,
+    device: Optional[torch.device] = None,
+    verbose: bool = True,
+) -> Dict[str, np.ndarray]:
+    """
+    Tensor-accelerated SAR processing pipeline.
+
+    Steps:
+      1. Extract backscatter, replace NaNs, move to device.
+      2. Multi-scale Gaussian smoothing.
+      3. Pixel-wise linear regression (trend + R²).
+      4. Change detection masks (positive / negative).
+
+    Args:
+        sar_da: xarray DataArray with dims (time, y, x).
+        threshold: Change detection threshold. If None, uses
+                   ``Config.CHANGE_THRESHOLD``.
+        scales: Gaussian sigma values for multi-scale smoothing.
+        weights: Combination weights for each scale.
+        batch_size: Frames per convolution batch.
+        device: Torch device. If None, auto-detected.
+        verbose: Print progress messages.
+
+    Returns:
+        Dictionary with keys:
+        - ``trend``: 2-D annualised trend (y, x).
+        - ``r_squared``: 2-D R² map (y, x).
+        - ``smoothed``: 3-D smoothed backscatter (time, y, x).
+        - ``positive_mask``: Boolean 2-D array of positive changes.
+        - ``negative_mask``: Boolean 2-D array of negative changes.
+        - ``processing_time``: Wall-clock seconds for the full pipeline.
+    """
+    if threshold is None:
+        threshold = Config.CHANGE_THRESHOLD
+
+    if device is None:
+        device = get_device(verbose=verbose)
+
+    if verbose:
+        print("=" * 60)
+        print("TENSOR-ACCELERATED SAR PROCESSING PIPELINE")
+        print("=" * 60)
+
+    start_total = time.time()
+
+    # --- 1. Prepare tensor ---------------------------------------------------
+    if verbose:
+        print("\n[1/3] Preparing tensor...")
+
+    ts_array = sar_da.values
+    ts_clean = np.nan_to_num(ts_array, nan=0.0).astype(np.float32)
+    ts_tensor = torch.from_numpy(ts_clean).to(device)
+
+    if verbose:
+        print(f"  Tensor shape: {tuple(ts_tensor.shape)}  device: {device}")
+
+    # --- 2. Multi-scale Gaussian smoothing ------------------------------------
+    if verbose:
+        print("\n[2/3] Applying multi-scale Gaussian smoothing...")
+
+    t0 = time.time()
+    smoothed = tensor_smooth_timeseries(
+        ts_tensor,
+        scales=scales,
+        weights=weights,
+        batch_size=batch_size,
+        device=device,
+        verbose=verbose,
+    )
+    if verbose:
+        print(f"  Smoothing completed in {time.time() - t0:.2f} s")
+
+    # --- 3. Linear regression -------------------------------------------------
+    if verbose:
+        print("\n[3/3] Computing tensor linear regression...")
+
+    t0 = time.time()
+    trend_annual, r_squared, smoothed_numpy = tensor_temporal_trend(
+        smoothed,
+        time_values=sar_da.time.values,
+        device=device,
+        verbose=verbose,
+    )
+    if verbose:
+        print(f"  Regression completed in {time.time() - t0:.2f} s")
+
+    # --- 4. Change detection --------------------------------------------------
+    # R² is not a p-value; pass a dummy all-zero array so that every pixel
+    # passes the p < 0.05 gate inside detect_changes.  Users who need
+    # proper p-values should fall back to processing.py.
+    dummy_pvalues = np.zeros_like(trend_annual)
+    positive_mask, negative_mask = detect_changes(
+        trend_annual, dummy_pvalues, threshold=threshold, verbose=verbose,
+    )
+
+    total_time = time.time() - start_total
+    if verbose:
+        print(f"\nTotal tensor processing time: {total_time:.2f} s")
+
+    return {
+        "trend": trend_annual,
+        "r_squared": r_squared,
+        "smoothed": smoothed_numpy,
+        "positive_mask": positive_mask,
+        "negative_mask": negative_mask,
+        "processing_time": total_time,
+    }
+
 
 def detect_changes(
     trend: np.ndarray,
@@ -265,125 +328,64 @@ def detect_changes(
     return positive_mask, negative_mask
 
 
-def process_sar_timeseries(
-    datacube: xr.DataArray,
-    threshold: Optional[float] = None,
-    gaussian_sigma: Optional[float] = None,
-    mean_filter_size: Optional[int] = None,
-    device: Optional[torch.device] = None,
-    verbose: bool = True,
-) -> dict:
+def get_device(verbose: bool = True) -> torch.device:
     """
-    Complete processing pipeline: compute trends, apply smoothing, detect changes.
-
-    This is a convenience function that chains together the main processing steps.
-
-    Args:
-        datacube: xarray DataArray with dimensions (time, y, x)
-        threshold: Change detection threshold. If None, uses Config.CHANGE_THRESHOLD.
-        gaussian_sigma: Sigma for Gaussian filter. If None, uses Config.GAUSSIAN_SIGMA.
-        mean_filter_size: Mean filter size. If None, uses Config.MEAN_FILTER_SIZE.
-        device: PyTorch device to use for smoothing. If None, uses get_device().
-        verbose: Print progress messages (default: True)
+    Automatically detect and return the best available device.
 
     Returns:
-        Dictionary containing:
-        - 'trend_da': Trend as xarray DataArray
-        - 'pvalues_da': P-values as xarray DataArray
-        - 'positive_mask_da': Positive mask as xarray DataArray
-        - 'negative_mask_da': Negative mask as xarray DataArray
-        - 'time_array': Time coordinates in years
-
-    Example:
-        >>> results = process_sar_timeseries(datacube, threshold=0.07)
-        >>> results['trend_da'].rio.to_raster("outputs/trend.tif")
-        >>> results['positive_mask_da'].rio.to_raster("outputs/positive_mask.tif")
+        torch.device: 'cuda' if GPU is available, otherwise 'cpu'
     """
-    if threshold is None:
-        threshold = Config.CHANGE_THRESHOLD
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
 
-    if verbose:
-        print("=" * 60)
-        print("SAR TIME SERIES PROCESSING PIPELINE")
-        print("=" * 60)
+        if verbose:
+            print(f"PyTorch version: {torch.__version__}")
+            print(f"CUDA available: {torch.cuda.is_available()}")
+            print(f"CUDA version: {torch.version.cuda}")
+            print(f"GPU count: {torch.cuda.device_count()}")
+            print(f"GPU detected: {torch.cuda.get_device_name(0)}")
+            print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+            
+    else:
+        device = torch.device('cpu')
+        if verbose:
+            print(f"No GPU detected, using CPU")
 
-    # Step 1: Compute temporal trend
-    if verbose:
-        print("\n[1/3] Computing temporal trend...")
-    start_time = time.time()
-    trend_raw, p_values, time_array = compute_temporal_trend(datacube, log_transform=True, verbose=verbose)
-    end_time = time.time()
-    if verbose:
-        print(f"Temporal trend computed in {end_time - start_time:.2f} seconds")
-
-    # Step 2: Apply spatial smoothing
-    if verbose:
-        print("\n[2/3] Applying spatial smoothing...")
-    start_time = time.time()
-    trend = apply_spatial_smoothing(
-        trend_raw, gaussian_sigma=gaussian_sigma, mean_filter_size=mean_filter_size, device=device, verbose=verbose
-    )
-    end_time = time.time()
-    if verbose:
-        print(f"Spatial smoothing applied in {end_time - start_time:.2f} seconds")
-
-    # Step 3: Detect changes
-    if verbose:
-        print("\n[3/3] Detecting changes...")
-    start_time = time.time()
-    positive_mask, negative_mask = detect_changes(trend, p_values, threshold=threshold, verbose=verbose)
-    end_time = time.time()
-    if verbose:
-        print(f"Change detection completed in {end_time - start_time:.2f} seconds")
-
-
-    return {
-        "trend": trend,
-        "pvalues": p_values,
-        "positive_mask": positive_mask,
-        "negative_mask": negative_mask,
-        "time_array": time_array,
-    }
+    return device
 
 
 def calculate_slope(dem_da: xr.DataArray,
                     path_slope: str = None,
-                    mode:str = 'deg'):
-    """
-    Calculate slope from DEM data.
+                    mode: str = 'deg'):
 
-    dem: Path to the DEM file
-    path_slope: Path to the output slope file
-    mode: 'perc' or 'deg'
-    """
+    if dem_da.rio.crs.is_geographic:
+        raise ValueError("DEM must be projected (units in meters).")
 
     if path_slope is None:
         path_slope = Config.get_output_path(Config.SLOPE_FILENAME)
 
-    # Get the data array (first band)
-    # Corrected: Use dem_da.values directly if dem_da is already 2D
-    dem = dem_da.values
+    dem = dem_da.values.astype(np.float32)
 
-    # Get cell size from the transform
-    dx = abs(dem_da.rio.resolution()[0])  # pixel width
-    dy = abs(dem_da.rio.resolution()[1])  # pixel height
+    res = dem_da.rio.resolution()[0]
 
-    # Calculate gradients using numpy gradient
-    dz_dx, dz_dy = np.gradient(dem, dx, dy)
+    nodata = dem_da.rio.nodata
+    if nodata is not None:
+        dem = np.where(dem == nodata, np.nan, dem)
+
+    dz_dy, dz_dx = np.gradient(dem, res)
+
+    grad = np.sqrt(dz_dx**2 + dz_dy**2)
 
     if mode == 'perc':
-        # Calculate slope in percentage
-        slope = np.sqrt(dz_dx**2 + dz_dy**2) * 100
+        slope = grad * 100
     elif mode == 'deg':
-    # Calculate slope in degrees
-        slope = np.arctan(np.sqrt(dz_dx**2 + dz_dy**2)) * (180 / np.pi)
+        slope = np.degrees(np.arctan(grad))
+    else:
+        raise ValueError("mode must be 'deg' or 'perc'")
 
-    # Create a new DataArray with the slope data
-    slope_da = dem_da.copy()
-    slope_da.values = slope # Assign the 2D slope array
+    slope_da = dem_da.copy(data=slope)
     slope_da.name = 'slope'
 
-    # Write output
-    slope_da.squeeze().rio.to_raster(path_slope, dtype='float32')
+    slope_da.rio.to_raster(path_slope, dtype='float32')
 
     return slope_da

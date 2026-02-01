@@ -33,6 +33,8 @@ class Config:
     # Sentinel Hub API credentials
     SENTINEL_HUB_CLIENT_ID = os.getenv("SENTINEL_HUB_CLIENT_ID")
     SENTINEL_HUB_CLIENT_SECRET = os.getenv("SENTINEL_HUB_CLIENT_SECRET")
+    SENTINEL_HUB_CONFIGURATION_ID = os.getenv("SENTINEL_HUB_CONFIGURATION_ID")
+
 
     # Open Topography Key
     KEY_OPEN_TOPOGRAPHY = os.getenv("KEY_OPEN_TOPOGRAPHY")
@@ -60,11 +62,12 @@ class Config:
     # ============================================================
 
     # Change detection threshold (log-intensity change per year)
-    CHANGE_THRESHOLD = 0.07
+    CHANGE_THRESHOLD = 0.05
     P_VALUE_THRESHOLD = 0.05
 
     # Spatial filtering parameters
-    GAUSSIAN_SIGMA = 1.5  # Gaussian filter sigma in pixels
+    GAUSSIAN_SIGMAS = [1.5, 2.5]  # Gaussian filter (in pixels) list for multi-scale smoothing
+    GAUSSIAN_WEIGHTS = [0.8, 0.2]  # Weights for the Gaussian filters
     MEAN_FILTER_SIZE = 3  # Mean filter kernel size (3x3)
 
     # Minimum number of valid acquisitions required
@@ -84,7 +87,6 @@ class Config:
     # Output file names
     DATACUBE_FILENAME = "sar_datacube.nc"
     TREND_MAP_FILENAME = "sar_trend.tif"
-    PVALUES_MAP_FILENAME = "sar_pvalues.tif"
     POSITIVE_MASK_FILENAME = "positive_change_mask.tif"
     NEGATIVE_MASK_FILENAME = "negative_change_mask.tif"
     INTENSITY_FIGURE_FILENAME = "sar_intensity.png"
@@ -123,29 +125,6 @@ class Config:
             True if both CLIENT_ID and CLIENT_SECRET are set, False otherwise
         """
         return bool(cls.SENTINEL_HUB_CLIENT_ID and cls.SENTINEL_HUB_CLIENT_SECRET)
-
-    @classmethod
-    def get_study_area(cls, name: str) -> Optional[Dict[str, Any]]:
-        """
-        Get predefined study area configuration.
-
-        Args:
-            name: Study area identifier (e.g., 'ipatinga_test')
-
-        Returns:
-            Dictionary with bbox, name, start_date, and resolution, or None if not found
-        """
-        return cls.STUDY_AREAS.get(name)
-
-    @classmethod
-    def list_study_areas(cls) -> List[str]:
-        """
-        List all available predefined study areas.
-
-        Returns:
-            List of study area names
-        """
-        return list(cls.STUDY_AREAS.keys())
 
     @classmethod
     def get_output_path(cls, filename: str) -> Path:

@@ -23,7 +23,7 @@ from .download import (
     get_dem
 )
 from .processing import (
-    process_sar_timeseries,
+    process_sar_timeseries_tensor,
     get_device,
     calculate_slope
 )

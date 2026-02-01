@@ -134,6 +134,10 @@ def buff_and_clip_geopackage(input_path, output_path, buffer_distance, clip_geom
         for feature in src:
             # Convert to Shapely geometry
             geom = shape(feature['geometry'])
+
+            # Clip to boundary if provided
+            if clip_geom is not None:
+                geom = geom.intersection(clip_geom)
             
             # Calculate buffer
             buffered_geom = geom.buffer(
@@ -142,21 +146,26 @@ def buff_and_clip_geopackage(input_path, output_path, buffer_distance, clip_geom
                 join_style=join_style,
                 resolution=resolution
             )
+
+            # Skip empty geometries
+            if buffered_geom.is_empty:
+                continue              
             
-            # Clip to boundary if provided
-            if clip_geom is not None:
-                buffered_geom = buffered_geom.intersection(clip_geom)
+            # Explode MultiPolygons into individual Polygons
+            if buffered_geom.geom_type == 'MultiPolygon':
+                polygons = list(buffered_geom.geoms)
+            elif buffered_geom.geom_type == 'GeometryCollection':
+                # Clipping can also produce GeometryCollections with mixed types
+                polygons = [g for g in buffered_geom.geoms if g.geom_type == 'Polygon']
+            else:
+                polygons = [buffered_geom]
+
+            for poly in polygons:
+                new_feature = {
+                    'geometry': mapping(poly),
+                    'properties': feature['properties']
+                }
                 
-                # Skip empty geometries
-                if buffered_geom.is_empty:
-                    continue
-            
-            # Create new feature with buffered (and optionally clipped) geometry
-            new_feature = {
-                'geometry': mapping(buffered_geom),
-                'properties': feature['properties']
-            }
-            
             dst.write(new_feature)
     
     src.close()

@@ -146,14 +146,16 @@ def request_s1_image(
             SentinelHubRequest.input_data(
                 DataCollection.SENTINEL1_IW,
                 time_interval=(date_str, date_str),
-                mosaicking_order="mostRecent",  # Use most recent if multiple acquisitions
+                mosaicking_order="mostRecent",
             )
         ],
         responses=[SentinelHubRequest.output_response("default", MimeType.TIFF)],
         bbox=bbox,
         size=size,
         config=config,
-    )
+        )   
+
+
 
     # Execute request and return first (and only) image
     return req.get_data()[0]

@@ -20,9 +20,7 @@ from io import BytesIO
 from PIL import Image
 import base64
 
-
 from .config import Config
-
 
 def plot_sar_intensity(
     datacube: xr.DataArray,
@@ -283,83 +281,6 @@ def plot_trend_map(
     return fig
 
 
-def plot_pvalues_map(
-    pvalues: np.ndarray,
-    p_threhsold: float = 0.05,
-    title: str = None,
-    figsize = None,
-    save_path= None,
-    dpi= None,
-    show: bool = True,
-    low_p_color = (0, 0, 1, 0.6),
-    high_p_color = (1, 0, 0, 0.6),
-) -> plt.Figure:
-    """
-    Display the p-values map of temporal trend linear regression.
-
-    Args:
-        pvalues: 2D p-values array
-        title: Figure title
-        figsize: Figure size as (width, height) in inches. If None, uses Config.FIGURE_SIZE.
-        save_path: Path to save figure. If None, doesn't save.
-        dpi: Resolution for saved figure. If None, uses Config.DPI.
-        show: Whether to display the figure (default: True)
-        low_p_color: RGBA color for p < 0.05) (default: blue with 60% opacity)
-        high_p_color:RGBA color for p > 0.05 (default: red with 60% opacity)
-
-    Returns:
-        matplotlib Figure object
-
-    Example:
-        >>> fig = plot_trend_map(trend, threshold=0.07, save_path="outputs/trend_map.png")
-    """
-    if figsize is None:
-        figsize = Config.FIGURE_SIZE
-
-    if dpi is None:
-        dpi = Config.DPI
-
-    # Create figure
-    fig, ax = plt.subplots(figsize=figsize)
-
-    # Apply threshold to identify significant changes
-    high_p_mask = pvalues > p_threhsold
-    low_p_mask = pvalues < p_threhsold
-
-    # Create RGBA overlay array
-    overlay = np.zeros((*pvalues.shape, 4))
-    overlay[low_p_mask] = low_p_color
-    overlay[high_p_mask] = high_p_color
-
-    # Plot trend map
-    im = ax.imshow(overlay, aspect="auto")
-
-    if title is None:
-        title = (
-            f"p-values of Temporal Trend in SAR Backscatter\n"
-            f"Blue: p-values < {p_threhsold}")
-
-    # Set title
-    ax.set_title(title, fontsize=14, fontweight="bold")
-
-    # Add axis labels
-    ax.set_xlabel("Longitude (pixels)", fontsize=11)
-    ax.set_ylabel("Latitude (pixels)", fontsize=11)
-
-    # Tight layout
-    plt.tight_layout()
-
-    # Save if requested
-    if save_path:
-        print(f"Figure saved to: {save_path}")
-
-    # Show if requested
-    if show:
-        plt.show()
-
-    return fig
-
-
 def plot_time_series(
     datacube: xr.DataArray,
     row: int,
@@ -446,7 +367,6 @@ def plot_time_series(
 def create_all_figures(
     datacube: xr.DataArray,
     trend: np.ndarray,
-    pvalues: np.ndarray,
     positive_mask: np.ndarray,
     negative_mask: np.ndarray,
     threshold: float,
@@ -494,7 +414,7 @@ def create_all_figures(
     print("Generating figures...")
 
     # Figure 1: SAR Intensity
-    print("  [1/3] SAR intensity image...")
+    print("  SAR intensity image...")
     fig1 = plot_sar_intensity(
         datacube,
         save_path=f"{output_dir}/{Config.INTENSITY_FIGURE_FILENAME}",
@@ -504,7 +424,7 @@ def create_all_figures(
     figures["intensity"] = fig1
 
     # Figure 2: Change Overlay
-    print("  [2/3] Change detection overlay...")
+    print("  Change detection overlay...")
     fig2 = plot_change_overlay(
         datacube,
         positive_mask,
@@ -517,7 +437,7 @@ def create_all_figures(
     figures["overlay"] = fig2
 
     # Figure 3: Trend Map
-    print("  [3/3] Trend map...")
+    print("  Trend map...")
     fig3 = plot_trend_map(
         trend,
         threshold=threshold,
@@ -526,16 +446,6 @@ def create_all_figures(
         show=show,
     )
     figures["trend"] = fig3
-
-    # Figure 4: p-values map
-    print("  [4/4] p-values map...")
-    fig4 = plot_pvalues_map(
-        pvalues,
-        save_path=f"{output_dir}/pvalues_map.png",
-        dpi=dpi,
-        show=show,
-    )
-    figures["pvalues"] = fig4
 
     print("All figures generated!")
 
@@ -625,12 +535,12 @@ def display_Folium_map(geojson_display_dicts, zoom_start: int = 6):
     return fmap
 
 
-def add_raster_to_folium(fmap, raster_data, name="Raster Layer", opacity=0.6, 
+def add_raster_to_folium(fmap, raster_data, name="Raster Layer", opacity=0.6,
                          cmap='gray', vmin=None, vmax=None, percentile_clip=(2, 98),
                          log_transform=False, nodata_value=None):
     """
     Add a raster layer to an existing Folium map with automatic reprojection.
-    
+
     Parameters:
     -----------
     fmap : folium.Map
@@ -653,61 +563,61 @@ def add_raster_to_folium(fmap, raster_data, name="Raster Layer", opacity=0.6,
         Whether to apply log10 transformation (useful for SAR data)
     nodata_value : float, optional
         Value to treat as nodata (will be transparent). If None, uses NaN
-    
+
     Returns:
     --------
     folium.Map
         The map object with the raster layer added
     """
-    
+
     # Reproject to WGS84 if needed (Folium standard)
     if raster_data.rio.crs != "EPSG:4326":
         print(f"Reprojecting from {raster_data.rio.crs} to EPSG:4326...")
         raster_data = raster_data.rio.reproject("EPSG:4326")
-    
+
     # Get bounds in Folium format [[south, west], [north, east]]
     bounds = raster_data.rio.bounds()  # (minx, miny, maxx, maxy)
     bounds_folium = [[bounds[1], bounds[0]], [bounds[3], bounds[2]]]
-    
+
     # Get data as numpy array
     data = raster_data.to_numpy()
-    
+
     # Handle nodata
     if nodata_value is not None:
         data = np.where(data == nodata_value, np.nan, data)
-    
+
     # Apply log transformation if requested
     if log_transform:
         data = np.log10(data + 1e-10)  # Add small value to avoid log(0)
-    
+
     # Normalize data
     if vmin is None or vmax is None:
         vmin_calc, vmax_calc = np.nanpercentile(data, percentile_clip)
         vmin = vmin if vmin is not None else vmin_calc
         vmax = vmax if vmax is not None else vmax_calc
-    
+
     data_norm = np.clip((data - vmin) / (vmax - vmin), 0, 1)
-    
+
     # Get colormap
     if isinstance(cmap, str):
         cmap_obj = plt.get_cmap(cmap)
     else:
         cmap_obj = cmap
-    
+
     # Apply colormap
     rgba = cmap_obj(data_norm)
-    
+
     # Set NaN values to transparent
     rgba[np.isnan(data)] = [0, 0, 0, 0]
-    
+
     # Convert to uint8 image
     img = Image.fromarray((rgba * 255).astype(np.uint8), mode='RGBA')
-    
+
     # Convert to base64 for Folium
     buffer = BytesIO()
     img.save(buffer, format='PNG')
     img_str = base64.b64encode(buffer.getvalue()).decode()
-    
+
     # Add to Folium map
     folium.raster_layers.ImageOverlay(
         image=f"data:image/png;base64,{img_str}",
@@ -717,6 +627,6 @@ def add_raster_to_folium(fmap, raster_data, name="Raster Layer", opacity=0.6,
         interactive=True,
         cross_origin=False
     ).add_to(fmap)
-    
+
     print(f"Added raster layer '{name}' to map")
     return fmap
