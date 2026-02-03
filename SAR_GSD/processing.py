@@ -1,8 +1,8 @@
 """
 Tensor-accelerated processing module for SAR time series analysis.
 
-Performs multi-scale Gaussian smoothing
-and linear regression entirely on GPU/CPU tensors via PyTorch
+Performs linear regression, then applies multi-scale Gaussian smoothing
+to the trend results - all operations done on GPU/CPU tensors via PyTorch.
 
 Computes slope from DEM data.
 """
@@ -35,32 +35,74 @@ def _build_gaussian_kernel(
     return kernel.view(1, 1, kernel_size, kernel_size)
 
 
-def tensor_smooth_timeseries(
+def tensor_temporal_trend(
     ts_tensor: torch.Tensor,
+    time_values: np.ndarray,
+    device: Optional[torch.device] = None,
+    verbose: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    
+    if device is None:
+        device = get_device(verbose=False)
+
+    ts_tensor = ts_tensor.to(device)
+    n_times = ts_tensor.shape[0]
+
+    # Convert time_values to years from first acquisition
+    from datetime import datetime
+    time_objects = [datetime.fromisoformat(str(t)[:10]) for t in time_values]
+    time_years = np.array([(t - time_objects[0]).days / 365.25 for t in time_objects])
+    
+    # Use actual time in years instead of indices
+    t = torch.from_numpy(time_years).float().to(device).view(-1, 1, 1)
+    t_mean = t.mean()
+    y_mean = ts_tensor.mean(dim=0)
+
+    numerator = ((ts_tensor - y_mean) * (t - t_mean)).sum(dim=0)
+    denominator = ((t - t_mean) ** 2).sum()
+
+    slope = numerator / denominator  # This is already in units/year
+    intercept = y_mean - slope * t_mean
+
+    y_pred = slope * t + intercept
+    ss_res = ((ts_tensor - y_pred) ** 2).sum(dim=0)
+    ss_tot = ((ts_tensor - y_mean) ** 2).sum(dim=0)
+
+    r_squared = 1 - ss_res / (ss_tot + 1e-8)
+
+    # No need to annualize - slope is already per year
+    trend_annual = slope
+
+    if verbose:
+        print(f"  Trend range: {trend_annual.min().item():.6f} to {trend_annual.max().item():.6f} /year")
+        print(f"  Mean R²: {r_squared.mean().item():.4f}")
+
+    return trend_annual, r_squared
+
+
+def tensor_smooth_spatial(
+    spatial_tensor: torch.Tensor,
     scales: Optional[List[float]] = None,
     weights: Optional[List[float]] = None,
-    batch_size: Optional[int] = None,
     device: Optional[torch.device] = None,
     verbose: bool = True,
 ) -> torch.Tensor:
     """
-    Apply multi-scale Gaussian smoothing to a 3-D time-series tensor.
+    Apply multi-scale Gaussian smoothing to a 2-D spatial tensor.
 
-    Each scale produces a spatially smoothed copy of the full time series;
-    the final result is a weighted combination of all scales.
+    Each scale produces a spatially smoothed copy; the final result is
+    a weighted combination of all scales.
 
     Args:
-        ts_tensor: Tensor of shape (n_times, height, width).
+        spatial_tensor: Tensor of shape (height, width).
         scales: List of Gaussian sigma values (default [1.5, 2.5]).
         weights: Per-scale weights for the combination (must sum to 1).
                  Default [0.4, 0.6].
-        batch_size: Frames per convolution batch. If None, auto-selected
-                    (16 for CUDA, 8 for CPU).
         device: Torch device. If None, uses get_device().
         verbose: Print progress messages.
 
     Returns:
-        Smoothed tensor of the same shape as *ts_tensor*.
+        Smoothed tensor of the same shape as *spatial_tensor*.
     """
     if scales is None:
         scales = Config.GAUSSIAN_SIGMAS
@@ -73,24 +115,20 @@ def tensor_smooth_timeseries(
     if device is None:
         device = get_device(verbose=verbose)
 
-    ts_tensor = ts_tensor.to(device)
+    spatial_tensor = spatial_tensor.to(device)
     w = torch.tensor(weights, device=device, dtype=torch.float32)
-    n_times = ts_tensor.shape[0]
 
-    if batch_size is None:
-        batch_size = 16 if device.type == "cuda" else 8
+    # Add batch and channel dimensions for conv2d: (1, 1, H, W)
+    input_tensor = spatial_tensor.unsqueeze(0).unsqueeze(0)
 
     smoothed_scales: list[torch.Tensor] = []
 
     for sigma in scales:
         kernel = _build_gaussian_kernel(sigma, device)
         pad = kernel.shape[-1] // 2
-        frames = []
-        for i in range(0, n_times, batch_size):
-            batch = ts_tensor[i : i + batch_size].unsqueeze(1)
-            smoothed = F.conv2d(batch, kernel, padding=pad)
-            frames.append(smoothed.squeeze(1))
-        smoothed_scales.append(torch.cat(frames, dim=0))
+        smoothed = F.conv2d(input_tensor, kernel, padding=pad)
+        # Remove batch and channel dims: (H, W)
+        smoothed_scales.append(smoothed.squeeze(0).squeeze(0))
 
     combined = sum(w[i] * smoothed_scales[i] for i in range(len(scales)))
 
@@ -100,106 +138,38 @@ def tensor_smooth_timeseries(
     return combined
 
 
-def tensor_temporal_trend(
-    smoothed: torch.Tensor,
-    time_values: np.ndarray,
-    device: Optional[torch.device] = None,
-    verbose: bool = True,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Pixel-wise linear regression over the time dimension using tensors.
-
-    Args:
-        smoothed: Tensor of shape (n_times, height, width) – typically the
-                  output of ``tensor_smooth_timeseries``.
-        time_values: 1-D array of datetime64 values (e.g. from
-                     ``datacube.time.values``).
-        device: Torch device. If None, uses get_device().
-        verbose: Print progress messages.
-
-    Returns:
-        Tuple of:
-        - trend_annual: 2-D numpy array (y, x) – slope annualised to
-          units / year.
-        - r_squared: 2-D numpy array (y, x) – coefficient of determination.
-        - smoothed_numpy: 3-D numpy array (time, y, x) – the smoothed data
-          passed through for convenience.
-    """
-    if device is None:
-        device = get_device(verbose=False)
-
-    smoothed = smoothed.to(device)
-    n_times = smoothed.shape[0]
-
-    # Tensor index as regressor (0 … n_times-1)
-    t = torch.arange(n_times, dtype=torch.float32, device=device).view(-1, 1, 1)
-    t_mean = t.mean()
-    y_mean = smoothed.mean(dim=0)
-
-    numerator = ((smoothed - y_mean) * (t - t_mean)).sum(dim=0)
-    denominator = ((t - t_mean) ** 2).sum()
-
-    slope = numerator / denominator
-    intercept = y_mean - slope * t_mean
-
-    y_pred = slope * t + intercept
-    ss_res = ((smoothed - y_pred) ** 2).sum(dim=0)
-    ss_tot = ((smoothed - y_mean) ** 2).sum(dim=0)
-
-    r_squared = 1 - ss_res / (ss_tot + 1e-8)
-
-    # Convert back to numpy
-    smoothed_numpy = smoothed.cpu().numpy()
-    trend_numpy = slope.cpu().numpy()
-    r_squared_numpy = r_squared.cpu().numpy()
-
-    # Annualise: slope is per-index-step; convert to per-year
-    time_diff = time_values[-1] - time_values[0]
-    time_span_years = float(
-        np.timedelta64(time_diff, "D").astype("float64") / 365.25
-    )
-    trend_annual = trend_numpy / time_span_years if time_span_years > 0 else trend_numpy
-
-    if verbose:
-        print(f"  Trend range: {np.nanmin(trend_annual):.6f} to {np.nanmax(trend_annual):.6f} /year")
-        print(f"  Mean R²: {np.nanmean(r_squared_numpy):.4f}")
-
-    return trend_annual, r_squared_numpy, smoothed_numpy
-
-
 def process_sar_timeseries_tensor(
     sar_da: xr.DataArray,
     threshold: Optional[float] = None,
     scales: Optional[List[float]] = None,
     weights: Optional[List[float]] = None,
-    batch_size: Optional[int] = None,
     device: Optional[torch.device] = None,
     verbose: bool = True,
 ) -> Dict[str, np.ndarray]:
     """
-    Tensor-accelerated SAR processing pipeline.
+    Tensor-accelerated SAR processing pipeline with REORDERED steps.
 
     Steps:
       1. Extract backscatter, replace NaNs, move to device.
-      2. Multi-scale Gaussian smoothing.
-      3. Pixel-wise linear regression (trend + R²).
+      2. Pixel-wise linear regression (trend + R²) on RAW data.
+      3. Multi-scale Gaussian smoothing on TREND and R² maps.
       4. Change detection masks (positive / negative).
 
     Args:
         sar_da: xarray DataArray with dims (time, y, x).
         threshold: Change detection threshold. If None, uses
                    ``Config.CHANGE_THRESHOLD``.
-        scales: Gaussian sigma values for multi-scale smoothing.
         weights: Combination weights for each scale.
-        batch_size: Frames per convolution batch.
+        scales: Gaussian sigma values for multi-scale smoothing.
         device: Torch device. If None, auto-detected.
         verbose: Print progress messages.
 
     Returns:
         Dictionary with keys:
-        - ``trend``: 2-D annualised trend (y, x).
-        - ``r_squared``: 2-D R² map (y, x).
-        - ``smoothed``: 3-D smoothed backscatter (time, y, x).
+        - ``trend``: 2-D smoothed annualised trend (y, x).
+        - ``r_squared``: 2-D smoothed R² map (y, x).
+        - ``trend_raw``: 2-D raw (unsmoothed) trend (y, x).
+        - ``r_squared_raw``: 2-D raw (unsmoothed) R² map (y, x).
         - ``positive_mask``: Boolean 2-D array of positive changes.
         - ``negative_mask``: Boolean 2-D array of negative changes.
         - ``processing_time``: Wall-clock seconds for the full pipeline.
@@ -217,40 +187,26 @@ def process_sar_timeseries_tensor(
 
     start_total = time.time()
 
+    # Get datacube values
+    ts_array = sar_da.values
+
     # --- 1. Prepare tensor ---------------------------------------------------
     if verbose:
         print("\n[1/3] Preparing tensor...")
 
-    ts_array = sar_da.values
     ts_clean = np.nan_to_num(ts_array, nan=0.0).astype(np.float32)
     ts_tensor = torch.from_numpy(ts_clean).to(device)
 
     if verbose:
         print(f"  Tensor shape: {tuple(ts_tensor.shape)}  device: {device}")
 
-    # --- 2. Multi-scale Gaussian smoothing ------------------------------------
+    # --- 2. Linear regression on RAW data ------------------------------------
     if verbose:
-        print("\n[2/3] Applying multi-scale Gaussian smoothing...")
+        print("\n[2/3] Computing tensor linear regression on raw data...")
 
     t0 = time.time()
-    smoothed = tensor_smooth_timeseries(
+    trend_annual, r_squared = tensor_temporal_trend(
         ts_tensor,
-        scales=scales,
-        weights=weights,
-        batch_size=batch_size,
-        device=device,
-        verbose=verbose,
-    )
-    if verbose:
-        print(f"  Smoothing completed in {time.time() - t0:.2f} s")
-
-    # --- 3. Linear regression -------------------------------------------------
-    if verbose:
-        print("\n[3/3] Computing tensor linear regression...")
-
-    t0 = time.time()
-    trend_annual, r_squared, smoothed_numpy = tensor_temporal_trend(
-        smoothed,
         time_values=sar_da.time.values,
         device=device,
         verbose=verbose,
@@ -258,13 +214,45 @@ def process_sar_timeseries_tensor(
     if verbose:
         print(f"  Regression completed in {time.time() - t0:.2f} s")
 
-    # --- 4. Change detection --------------------------------------------------
+    # Keep raw versions
+    trend_raw = trend_annual.clone()
+    r_squared_raw = r_squared.clone()
+
+    # --- 3. Multi-scale Gaussian smoothing on TREND and R² -------------------
+    if verbose:
+        print("\n[3/3] Applying multi-scale Gaussian smoothing to trend and R²...")
+
+    t0 = time.time()
+    trend_smoothed = tensor_smooth_spatial(
+        trend_annual,
+        scales=scales,
+        weights=weights,
+        device=device,
+        verbose=verbose,
+    )
+    r_squared_smoothed = tensor_smooth_spatial(
+        r_squared,
+        scales=scales,
+        weights=weights,
+        device=device,
+        verbose=False,  # Don't print twice
+    )
+    if verbose:
+        print(f"  Smoothing completed in {time.time() - t0:.2f} s")
+
+    # --- 4. Convert to numpy -------------------------------------------------
+    trend_numpy = trend_smoothed.cpu().numpy()
+    r_squared_numpy = r_squared_smoothed.cpu().numpy()
+    trend_raw_numpy = trend_raw.cpu().numpy()
+    r_squared_raw_numpy = r_squared_raw.cpu().numpy()
+
+    # --- 5. Change detection --------------------------------------------------
     # R² is not a p-value; pass a dummy all-zero array so that every pixel
     # passes the p < 0.05 gate inside detect_changes.  Users who need
     # proper p-values should fall back to processing.py.
-    dummy_pvalues = np.zeros_like(trend_annual)
+    dummy_pvalues = np.zeros_like(trend_numpy)
     positive_mask, negative_mask = detect_changes(
-        trend_annual, dummy_pvalues, threshold=threshold, verbose=verbose,
+        trend_numpy, dummy_pvalues, threshold=threshold, verbose=verbose,
     )
 
     total_time = time.time() - start_total
@@ -272,9 +260,10 @@ def process_sar_timeseries_tensor(
         print(f"\nTotal tensor processing time: {total_time:.2f} s")
 
     return {
-        "trend": trend_annual,
-        "r_squared": r_squared,
-        "smoothed": smoothed_numpy,
+        "trend": trend_numpy,
+        "r_squared": r_squared_numpy,
+        "trend_raw": trend_raw_numpy,
+        "r_squared_raw": r_squared_raw_numpy,
         "positive_mask": positive_mask,
         "negative_mask": negative_mask,
         "processing_time": total_time,
