@@ -4,6 +4,8 @@ A Python package for detecting and quantifying ground surface changes using mult
 
 ![alt text](sar_gsd_gearth.png)
 
+![alt text](sar_change_overlay.png)
+
 ## Motivation
 
 In engineering and infrastructure management, land use changes beneath transmission lines demand continuous attention. Erosion and landslides can expose tower foundations, potentially leading to power supply disruptions, structural damage, and fire hazards. Understanding terrain dynamics is critical for maintaining grid reliability and public safety.
