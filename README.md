@@ -2,6 +2,8 @@
 
 A Python package for detecting and quantifying ground surface changes using multi-temporal Sentinel-1 SAR (Synthetic Aperture Radar) imagery. The pipeline builds georeferenced datacubes, applies tensor-accelerated speckle filtering and trend analysis, and integrates the results with terrain and infrastructure data for applied geospatial analysis.
 
+![alt text](sar_gsd_gearth.png)
+
 ## Motivation
 
 In engineering and infrastructure management, land use changes beneath transmission lines demand continuous attention. Erosion and landslides can expose tower foundations, potentially leading to power supply disruptions, structural damage, and fire hazards. Understanding terrain dynamics is critical for maintaining grid reliability and public safety.
